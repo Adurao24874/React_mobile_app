@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">GRIP</string>
+    <string name="title_activity_main">GRIP</string>
+    <string name="package_name">com.adars.grip</string>
+    <string name="custom_url_scheme">com.adars.grip</string>
+</resources>

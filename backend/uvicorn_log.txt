@@ -1,0 +1,18 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\adars\\OneDrive\\Desktop\\Mobapp\\backend']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [30136] using WatchFiles
+Loading YOLO Models...
+✅ Loaded Garbage YOLO Model
+✅ Loaded Pothole YOLO Model
+Loading Roboflow Model...
+loading Roboflow workspace...
+loading Roboflow project...
+INFO:     Started server process [3080]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'main.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3080]
+✅ Loaded Roboflow Road Cracks Model

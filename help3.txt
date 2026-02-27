@@ -1,0 +1,52 @@
+
+[36m   ██████╗ ███████╗██████╗
+  ██╔════╝ ██╔════╝██╔══██╗
+  ██║  ███╗███████╗██║  ██║
+  ██║   ██║╚════██║██║  ██║
+  ╚██████╔╝███████║██████╔╝
+   ╚═════╝ ╚══════╝╚═════╝[0m
+
+  Get Shit Done [2mv1.20.6[0m
+  A meta-prompting, context engineering and spec-driven
+  development system for Claude Code, OpenCode, and Gemini by TÂCHES.
+
+  [33mUsage:[0m npx get-shit-done-cc [options]
+
+  [33mOptions:[0m
+    [36m-g, --global[0m              Install globally (to config directory)
+    [36m-l, --local[0m               Install locally (to current directory)
+    [36m--claude[0m                  Install for Claude Code only
+    [36m--opencode[0m                Install for OpenCode only
+    [36m--gemini[0m                  Install for Gemini only
+    [36m--all[0m                     Install for all runtimes
+    [36m-u, --uninstall[0m           Uninstall GSD (remove all GSD files)
+    [36m-c, --config-dir <path>[0m   Specify custom config directory
+    [36m-h, --help[0m                Show this help message
+    [36m--force-statusline[0m        Replace existing statusline config
+
+  [33mExamples:[0m
+    [2m# Interactive install (prompts for runtime and location)[0m
+    npx get-shit-done-cc
+
+    [2m# Install for Claude Code globally[0m
+    npx get-shit-done-cc --claude --global
+
+    [2m# Install for Gemini globally[0m
+    npx get-shit-done-cc --gemini --global
+
+    [2m# Install for all runtimes globally[0m
+    npx get-shit-done-cc --all --global
+
+    [2m# Install to custom config directory[0m
+    npx get-shit-done-cc --claude --global --config-dir ~/.claude-bc
+
+    [2m# Install to current project only[0m
+    npx get-shit-done-cc --claude --local
+
+    [2m# Uninstall GSD from Claude Code globally[0m
+    npx get-shit-done-cc --claude --global --uninstall
+
+  [33mNotes:[0m
+    The --config-dir option is useful when you have multiple configurations.
+    It takes priority over CLAUDE_CONFIG_DIR / GEMINI_CONFIG_DIR environment variables.
+
