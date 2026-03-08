@@ -7,11 +7,19 @@ import { StorageService } from './services/storage';
 import { SyncEngine } from './services/sync';
 import { Network } from '@capacitor/network';
 import { Motion } from '@capacitor/motion';
-import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle } from 'react-leaflet';
+import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase } from './lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import { NativeSettings, AndroidSettings } from 'capacitor-native-settings';
+
+const blueDotIcon = new L.Icon({
+    iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+    iconSize: [32, 32],
+    iconAnchor: [16, 32],
+    popupAnchor: [0, -32]
+});
 
 function Home() {
     return (
@@ -277,7 +285,9 @@ function ReportGarbage() {
     const takePicture = async () => {
         try {
             const image = await CapCamera.getPhoto({
-                quality: 90,
+                quality: 60,
+                width: 1280,
+                height: 720,
                 allowEditing: false,
                 resultType: CameraResultType.Uri,
                 source: CameraSource.Camera
@@ -294,7 +304,12 @@ function ReportGarbage() {
 
     const fetchLocation = async () => {
         try {
-            const coordinates = await Geolocation.getCurrentPosition();
+            await Geolocation.requestPermissions();
+            const coordinates = await Geolocation.getCurrentPosition({
+                enableHighAccuracy: true,
+                timeout: 15000,
+                maximumAge: 0
+            });
             setLoc({
                 lat: coordinates.coords.latitude,
                 lng: coordinates.coords.longitude
@@ -418,10 +433,10 @@ function LiveMapUpdater({ position }: { position: { lat: number, lng: number } |
 function PotholeDetection() {
     const navigate = useNavigate();
     const [isRecording, setIsRecording] = useState(false);
-    const [showWarning, setShowWarning] = useState(false);
-    const [currentLocation, setCurrentLocation] = useState<{ lat: number, lng: number } | null>(null);
+    const [currentLocation, setCurrentLocation] = useState<{ lat: number, lng: number, accuracy: number } | null>(null);
     const [sampleCount, setSampleCount] = useState(0);
     const [uploadStatus, setUploadStatus] = useState<'idle' | 'saving' | 'success' | 'failed'>('idle');
+    const [showSavePrompt, setShowSavePrompt] = useState(false);
     const [liveAccel, setLiveAccel] = useState({ x: 0, y: 0, z: 0 });
     const [liveGyro, setLiveGyro] = useState({ x: 0, y: 0, z: 0 });
     const batchRef = useRef<Array<{
@@ -434,6 +449,10 @@ function PotholeDetection() {
         timestamp: number;
     }>>([]);
     const geoWatchId = useRef<string | null>(null);
+    const pitchRef = useRef<number>(0);
+    const rollRef = useRef<number>(0);
+    const lastSavedTimeRef = useRef<number>(0);
+    const currentLocationRef = useRef<{ lat: number, lng: number } | null>(null);
 
     useEffect(() => {
         let interval: any;
@@ -449,54 +468,114 @@ function PotholeDetection() {
 
     const startMonitoring = async () => {
         try {
-            // Dismiss warning
-            setShowWarning(false);
             setUploadStatus('idle');
 
-            // Request permissions
+            // 1. Check if Locations Services / GPS is actually ON
+            try {
+                await Geolocation.getCurrentPosition({
+                    enableHighAccuracy: true,
+                    timeout: 5000,
+                    maximumAge: 0
+                });
+            } catch (error) {
+                console.warn("GPS appears to be off", error);
+                alert("GPS is turned off. Please enable location services to use Pothole Detection.");
+                await NativeSettings.openAndroid({ option: AndroidSettings.Location });
+                setIsRecording(false);
+                return; // Stop execution
+            }
+
+            // 2. Request permissions for motion and location just in case
             if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
                 await (DeviceMotionEvent as any).requestPermission();
             }
+            await Geolocation.requestPermissions();
 
             // Start continuous GPS watcher
             geoWatchId.current = await Geolocation.watchPosition({
                 enableHighAccuracy: true,
                 timeout: 5000,
                 maximumAge: 0
-            }, (position) => {
+            }, (position, err) => {
+                if (err) {
+                    console.error("Lost GPS during recording", err);
+                    return;
+                }
+
                 if (position) {
                     setCurrentLocation({
                         lat: position.coords.latitude,
-                        lng: position.coords.longitude
+                        lng: position.coords.longitude,
+                        accuracy: position.coords.accuracy
                     });
+                    currentLocationRef.current = {
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude
+                    };
                 }
             });
 
             setIsRecording(true);
             batchRef.current = [];
+            pitchRef.current = 0;
+            rollRef.current = 0;
+            lastSavedTimeRef.current = 0;
 
-            await Motion.addListener('accel', (event) => {
-                const zAccel = event.acceleration.z || 0;
-                const xAccel = event.acceleration.x || 0;
-                const yAccel = event.acceleration.y || 0;
+            const handleOrientation = (event: any) => {
+                pitchRef.current = ((event.beta || 0) * Math.PI) / 180;
+                rollRef.current = ((event.gamma || 0) * Math.PI) / 180;
+            };
 
-                const xGyro = event.rotationRate?.alpha || 0;
-                const yGyro = event.rotationRate?.beta || 0;
-                const zGyro = event.rotationRate?.gamma || 0;
+            const handleMotion = (event: DeviceMotionEvent) => {
+                try {
+                    const currentTime = Date.now();
+                    if (currentTime - lastSavedTimeRef.current < 20) return;
+                    lastSavedTimeRef.current = currentTime;
 
-                setLiveAccel({ x: xAccel, y: yAccel, z: zAccel });
-                setLiveGyro({ x: xGyro, y: yGyro, z: zGyro });
+                    // Support both raw acceleration and including gravity
+                    const accel = event.acceleration || event.accelerationIncludingGravity;
+                    if (!accel) return;
 
-                batchRef.current.push({
-                    accelZ: zAccel,
-                    gyroX: xGyro,
-                    gyroY: yGyro,
-                    gyroZ: zGyro,
-                    lat: currentLocation?.lat,
-                    lng: currentLocation?.lng,
-                    timestamp: Date.now()
-                });
-            });
+                    const ax = accel.x || 0;
+                    const ay = accel.y || 0;
+                    const az = accel.z || 0;
+
+                    const pitch = pitchRef.current || 0;
+                    const roll = rollRef.current || 0;
+
+                    // Compute true vertical acceleration independent of phone orientation
+                    const vertical = ax * Math.sin(pitch) + ay * Math.sin(roll) + az * Math.cos(pitch) * Math.cos(roll);
+
+                    // Subtract gravity to get linear vertical acceleration (if using accelerationIncludingGravity)
+                    const verticalLinear = event.acceleration ? vertical : (vertical - 9.81);
+
+                    const xGyro = event.rotationRate?.alpha || 0;
+                    const yGyro = event.rotationRate?.beta || 0;
+                    const zGyro = event.rotationRate?.gamma || 0;
+
+                    setLiveAccel({ x: ax, y: ay, z: verticalLinear });
+                    setLiveGyro({ x: xGyro, y: yGyro, z: zGyro });
+
+                    batchRef.current.push({
+                        accelZ: verticalLinear,
+                        gyroX: xGyro,
+                        gyroY: yGyro,
+                        gyroZ: zGyro,
+                        lat: currentLocationRef.current?.lat,
+                        lng: currentLocationRef.current?.lng,
+                        timestamp: currentTime
+                    });
+                } catch (err) {
+                    console.error("Error processing sensor data:", err);
+                }
+            };
+
+            window.addEventListener('deviceorientation', handleOrientation);
+            window.addEventListener('devicemotion', handleMotion);
+
+            // Store references to remove them later
+            (window as any)._motionHandler = handleMotion;
+            (window as any)._orientationHandler = handleOrientation;
 
         } catch (e) {
             console.error("Failed to start sensors:", e);
@@ -507,29 +586,38 @@ function PotholeDetection() {
 
     const stopMonitoring = async () => {
         setIsRecording(false);
-        await Motion.removeAllListeners();
+
+        window.removeEventListener('devicemotion', (window as any)._motionHandler);
+        window.removeEventListener('deviceorientation', (window as any)._orientationHandler);
 
         if (geoWatchId.current) {
             await Geolocation.clearWatch({ id: geoWatchId.current });
             geoWatchId.current = null;
         }
 
-        // Save the massive continuous session array to local storage
         if (batchRef.current.length > 0) {
-            setUploadStatus('saving');
-            await StorageService.saveSensorBatch({
-                readings: batchRef.current
-            });
-            batchRef.current = [];
-
-            // Await background upload sequence
-            try {
-                await SyncEngine.syncAll();
-                setUploadStatus('success');
-            } catch (err) {
-                setUploadStatus('failed');
-            }
+            setShowSavePrompt(true);
         }
+    };
+
+    const saveSession = async () => {
+        setShowSavePrompt(false);
+        setUploadStatus('saving');
+        await StorageService.saveSensorBatch({ readings: batchRef.current });
+        batchRef.current = [];
+
+        try {
+            await SyncEngine.syncAll();
+            setUploadStatus('success');
+        } catch (err) {
+            setUploadStatus('failed');
+        }
+    };
+
+    const discardSession = () => {
+        batchRef.current = [];
+        setSampleCount(0);
+        setShowSavePrompt(false);
     };
 
     // Clean up on unmount
@@ -582,7 +670,14 @@ function PotholeDetection() {
                             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                         />
                         {currentLocation && (
-                            <Marker position={[currentLocation.lat, currentLocation.lng]} />
+                            <>
+                                <Circle
+                                    center={[currentLocation.lat, currentLocation.lng]}
+                                    radius={currentLocation.accuracy}
+                                    pathOptions={{ color: "#3b82f6", fillColor: "#3b82f6", fillOpacity: 0.15, weight: 1 }}
+                                />
+                                <Marker position={[currentLocation.lat, currentLocation.lng]} icon={blueDotIcon} />
+                            </>
                         )}
                         <LiveMapUpdater position={currentLocation} />
                     </MapContainer>
@@ -646,7 +741,7 @@ function PotholeDetection() {
                 </div>
 
                 <button
-                    onClick={isRecording ? stopMonitoring : () => setShowWarning(true)}
+                    onClick={isRecording ? stopMonitoring : startMonitoring}
                     className={`w-full py-5 text-white font-bold text-lg rounded-2xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.98] ${isRecording
                         ? 'bg-red-500 hover:bg-red-600'
                         : 'bg-gradient-to-r from-green-500 to-blue-600 hover:opacity-90'
@@ -659,29 +754,22 @@ function PotholeDetection() {
                     )}
                 </button>
 
-                {showWarning && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-                        <div className="bg-white dark:bg-zinc-800 rounded-3xl p-6 w-full max-w-sm shadow-xl space-y-4">
-                            <h3 className="text-xl font-bold flex items-center gap-2 text-gray-900 dark:text-white">
-                                ⚠️ Important Reminder
+                {showSavePrompt && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in">
+                        <div className="bg-white dark:bg-zinc-800 rounded-3xl p-6 w-full max-w-sm shadow-xl space-y-4 animate-in zoom-in-95 duration-200">
+                            <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">
+                                Session Ended
                             </h3>
                             <p className="text-gray-600 dark:text-gray-300">
-                                This session requires continuous background tracking to analyze the road surface correctly.
+                                You collected <strong className="text-blue-500">{sampleCount}</strong> data samples during this trip. Would you like to save and upload them to the community map?
                             </p>
-                            <ul className="text-sm font-medium space-y-2 text-gray-700 dark:text-gray-200 bg-orange-50 dark:bg-orange-900/20 p-4 rounded-xl">
-                                <li>1. Please enable <strong>Precise Location / GPS</strong>.</li>
-                                <li>2. Disable <strong>Battery Saver</strong> mode.</li>
-                                <li>3. Ensure the phone is mounted securely.</li>
-                            </ul>
-                            <div className="flex gap-2 pt-2">
-                                <button onClick={() => setShowWarning(false)} className="flex-1 py-3 bg-gray-100 dark:bg-zinc-700 text-gray-700 dark:text-gray-200 rounded-xl font-bold text-sm">Cancel</button>
-                                <button onClick={() => NativeSettings.openAndroid({ option: AndroidSettings.Location })} className="flex-1 py-3 border border-blue-500 dark:border-blue-400 text-blue-600 dark:text-blue-400 rounded-xl font-bold text-sm whitespace-nowrap px-1 hover:bg-blue-50 dark:hover:bg-blue-900/20">⚙️ Settings</button>
-                                <button onClick={startMonitoring} className="flex-1 py-3 bg-green-500 text-white rounded-xl font-bold text-sm">I Agree</button>
+                            <div className="flex gap-3 pt-2">
+                                <button onClick={discardSession} className="flex-1 py-3 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded-xl font-bold text-sm transition-colors hover:bg-red-100 dark:hover:bg-red-900/40">Discard</button>
+                                <button onClick={saveSession} className="flex-1 py-3 bg-gradient-to-r from-green-500 to-blue-600 hover:opacity-90 text-white rounded-xl font-bold text-sm transition-opacity shadow-lg shadow-blue-500/25">Save Data</button>
                             </div>
                         </div>
                     </div>
                 )}
-
                 <button onClick={() => navigate('/map')} className="w-full py-4 bg-gray-100 dark:bg-zinc-800 text-blue-600 dark:text-blue-500 hover:bg-gray-200 dark:hover:bg-zinc-700 transition-colors font-bold rounded-xl border border-dashed border-blue-200 dark:border-blue-800 flex items-center justify-center gap-2">
                     <MapPin className="w-5 h-5" />
                     View Community Pothole Map
@@ -707,6 +795,62 @@ function PotholeDetection() {
             </div>
         </div>
     )
+}
+
+function LocateControl() {
+    const map = useMap();
+    const [locating, setLocating] = useState(false);
+    const [currentPos, setCurrentPos] = useState<{ lat: number, lng: number, accuracy: number } | null>(null);
+
+    const handleLocate = async () => {
+        setLocating(true);
+        try {
+            await Geolocation.requestPermissions();
+            const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+            const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+            setCurrentPos(coords);
+            map.flyTo([coords.lat, coords.lng], 16, { animate: true });
+        } catch (e) {
+            console.error("Locate error", e);
+        } finally {
+            setLocating(false);
+        }
+    };
+
+    return (
+        <>
+            {currentPos && (
+                <>
+                    <Circle
+                        center={[currentPos.lat, currentPos.lng]}
+                        radius={currentPos.accuracy}
+                        pathOptions={{ color: "#3b82f6", fillColor: "#3b82f6", fillOpacity: 0.15, weight: 1 }}
+                    />
+                    <Marker position={[currentPos.lat, currentPos.lng]} icon={blueDotIcon} />
+                </>
+            )}
+            <div className="absolute bottom-6 right-4 z-[1000] pointer-events-auto">
+                <button
+                    onClick={handleLocate}
+                    disabled={locating}
+                    className="bg-zinc-800/90 backdrop-blur-md p-3 rounded-2xl shadow-lg border border-white/10 hover:bg-zinc-700 transition-colors flex items-center justify-center text-white"
+                >
+                    {locating ? (
+                        <div className="w-6 h-6 rounded-full border-2 border-blue-500 border-t-transparent animate-spin"></div>
+                    ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="12" cy="12" r="4" fill="currentColor" />
+                            <circle cx="12" cy="12" r="8" />
+                            <line x1="12" y1="2" x2="12" y2="4" />
+                            <line x1="12" y1="20" x2="12" y2="22" />
+                            <line x1="2" y1="12" x2="4" y2="12" />
+                            <line x1="20" y1="12" x2="22" y2="12" />
+                        </svg>
+                    )}
+                </button>
+            </div>
+        </>
+    );
 }
 
 function MapViewer() {
@@ -841,6 +985,7 @@ function MapViewer() {
                                 </Popup>
                             </CircleMarker>
                         ))}
+                        <LocateControl />
                     </MapContainer>
 
                     {/* Layer Filter Controls */}

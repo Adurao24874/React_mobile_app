@@ -14,6 +14,24 @@ This repository contains the source code for the GRIP project, which includes a 
     *   Handles image uploads (active issues) and sensor telemetry data (passive issues).
     *   Stores data and predictions in a Supabase database.
 
+## Data & ML Flow Architecture
+
+The GRIP system uses a hybrid processing model where data is collected on the edge and processed in the cloud:
+
+### 1. Passive Sensor Telemetry (Pothole Detection)
+*   **Collection**: The mobile app (`grip/src/App.tsx`) records accelerometer and gyroscope data at **50Hz**. Every sample is tagged with live GPS coordinates using a `useRef` location buffer to prevent dropouts.
+*   **Transport**: Data is batched into JSON files and uploaded to **Supabase Storage** (`reports` bucket).
+*   **Processing**: The `backend/worker.py` script polls for new batches and executes the `process_sensors` workflow.
+*   **Physics Engine**: The logic resides in `backend/telemetry.py`, using High-Pass filters and vertical projection to isolate "road shocks" (z-axis vibrations) independent of phone orientation.
+*   **Classification**: The `classify_dataframe` function identifies features like **Humps, Potholes, and Rumble Strips** based on vibration intensity and signature patterns.
+*   **Storage**: Extracted coordinate clusters are saved to the `road_conditions` table for map visualization.
+
+### 2. Active Image Reports (Debris Detection)
+*   **Collection**: Users capture images of road issues (garbage, deep potholes) via the **Camera API**.
+*   **Transport**: Images are uploaded to the `reports` bucket in **Supabase Storage**.
+*   **Processing**: `backend/worker.py` detects pending reports and runs local **YOLO AI models** (`garbage.pt.pt`, `pothole.pt`).
+*   **Classification**: High-confidence detections are labeled (e.g., "Plastic Waste", "Deep Pothole") and stored in the `reports` table.
+
 ## Tasks Performed During Initialization
 
 1.  **Repository Setup:** Initialized a local Git repository for the project.

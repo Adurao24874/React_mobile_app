@@ -2,6 +2,7 @@ import os
 import time
 import json
 import asyncio
+import math
 from supabase import create_client, Client
 from PIL import Image
 from ultralytics import YOLO
@@ -128,7 +129,7 @@ def process_sensors(batch):
         print(f"    📊 Loaded {len(readings)} sensor samples into RAM")
     except Exception as e:
         print(f"    ❌ Failed to download or read sensors: {e}")
-        supabase.table('sensors').update({"status": "failed"}).eq("id", batch.get('id')).execute()
+        supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
         return
 
     # 2. Run Python Telemetry Pipeline
@@ -165,7 +166,7 @@ def process_sensors(batch):
         # Run legacy apptesting extraction math (70 samples min = 0.7s)
         events, _ = classify_dataframe(
             df,
-            min_samples=20, # Relaxing for dev testing
+            min_samples=50, # Set to 50 to match the new 50Hz app sampling rate
             use_gyro=True,
             axis_mode='z'
         )
@@ -175,23 +176,33 @@ def process_sensors(batch):
         # 3. Push coordinates to Map Visualization Database
         if len(events) > 0:
             print("    📤 Uploading coordinate clusters to Supabase Map Layer...")
+            success_count = 0
             for event in events:
                 if math.isnan(event['latitude']) or math.isnan(event['longitude']):
                     continue
                     
-                supabase.table('road_conditions').insert({
-                    'batch_id': batch.get('id'),
-                    'latitude': event['latitude'],
-                    'longitude': event['longitude'],
-                    'vibration_intensity': event['vibration_intensity'],
-                    'condition_label': event['label'], # GOOD, POTHOLE, MINOR, BAD, HUMP, RUMBLE
-                    'color_hex': event['color_hex'],
-                    'timestamp': event['timestamp']
-                }).execute()
+                try:
+                    # Convert the frontend's unix milliseconds into an integer for the BIGINT column
+                    ts_ms = int(event['timestamp'])
+
+                    supabase.table('road_conditions').insert({
+                        'batch_id': batch['batch_id'],
+                        'latitude': event['latitude'],
+                        'longitude': event['longitude'],
+                        'vibration_intensity': event['vibration_intensity'],
+                        'condition_label': event['label'], # GOOD, POTHOLE, MINOR, BAD, HUMP, RUMBLE
+                        'color_hex': event['color_hex'],
+                        'timestamp': ts_ms
+                    }).execute()
+                    success_count += 1
+                except Exception as insert_err:
+                    print(f"        ⚠️ Failed to insert coordinate point: {insert_err}")
+            
+            print(f"    ✅ Successfully inserted {success_count} points into road_conditions")
         
     except Exception as e:
         print(f"    ❌ Telemetry Physics failed: {e}")
-        supabase.table('sensors').update({"status": "failed"}).eq("id", batch.get('id')).execute()
+        supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
         return
     
     # Complete Workflow
@@ -199,7 +210,7 @@ def process_sensors(batch):
     try:
         supabase.table('sensors').update({
             "status": "completed"
-        }).eq("id", batch.get('id')).execute()
+        }).eq("id", batch['id']).execute()
     except Exception as e:
         print(f"    ❌ Database update failed: {e}")
         return
