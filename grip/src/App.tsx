@@ -13,6 +13,7 @@ import 'leaflet/dist/leaflet.css';
 import { supabase } from './lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import { NativeSettings, AndroidSettings } from 'capacitor-native-settings';
+import { Capacitor } from '@capacitor/core';
 
 const blueDotIcon = new L.Icon({
     iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
@@ -303,6 +304,37 @@ function ReportGarbage() {
     };
 
     const fetchLocation = async () => {
+    const isWeb = Capacitor.getPlatform() === 'web';
+
+    if (isWeb) {
+        // --- LAPTOP / BROWSER LOGIC ---
+        console.log("💻 Web detected: Using native HTML5 Geolocation...");
+        
+        if (!navigator.geolocation) {
+            alert("Your browser does not support Geolocation.");
+            return;
+        }
+
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                console.log("📍 Laptop Location:", position.coords);
+                setLoc({
+                    lat: position.coords.latitude,
+                    lng: position.coords.longitude
+                });
+            },
+            (error) => {
+                console.error("Laptop GPS Error:", error);
+                // This will tell us EXACTLY why it failed (Timeout, Permission Denied, or Unavailable)
+                alert(`Laptop GPS Error: ${error.message}`); 
+                setLoc(null);
+            },
+            { enableHighAccuracy: false, timeout: 15000, maximumAge: 0 }
+        );
+
+    } else {
+        // --- MOBILE APP LOGIC ---
+        console.log("📱 Mobile detected: Using Capacitor Geolocation...");
         try {
             await Geolocation.requestPermissions();
             const coordinates = await Geolocation.getCurrentPosition({
@@ -310,17 +342,18 @@ function ReportGarbage() {
                 timeout: 15000,
                 maximumAge: 0
             });
+            
             setLoc({
                 lat: coordinates.coords.latitude,
                 lng: coordinates.coords.longitude
             });
         } catch (e) {
-            console.error("Location error:", e);
-            // Fallback coordinates if location fails (e.g., in a browser without perms)
-            setLoc({ lat: 15.2993, lng: 74.1240 });
+            console.error("Mobile Location error:", e);
+            setLoc(null); 
+            alert(`Mobile GPS Error: ${e.message || "Unknown error"}`);
         }
-    };
-
+    }
+};
     const handleSave = async () => {
         if (!imageUri || !loc) return;
 
