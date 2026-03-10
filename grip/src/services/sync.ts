@@ -29,6 +29,27 @@ export const SyncEngine = {
         this.syncPromise = (async () => {
             this.isSyncing = true;
             try {
+                // Check Server Status to avoid uploading massive payloads when backend is offline
+                const { data: statusData, error: statusErr } = await supabase
+                    .from('sensors')
+                    .select('local_file_path')
+                    .eq('id', '11111111-1111-1111-1111-111111111111')
+                    .single();
+
+                if (statusErr || !statusData) {
+                    console.log("Server status unknown, pausing sync to prevent storage bloat.");
+                    return; // Early return prevents sync
+                }
+
+                // local_file_path acts as the timestamp ISO string in our hack
+                const lastSeen = new Date(statusData.local_file_path).getTime();
+                const now = new Date().getTime();
+
+                if (now - lastSeen > 60000) { // 60 seconds tolerance
+                    console.log("Backend offline (No heartbeat), pausing sync to prevent storage bloat.");
+                    return;
+                }
+
                 await this.syncIssues();
                 await this.syncSensors();
             } catch (e) {
@@ -47,7 +68,11 @@ export const SyncEngine = {
 
         for (const issue of issues) {
             try {
-                await StorageService.markIssueSyncing(issue.id);
+                if (issue.lat === 0 || issue.lng === 0) {
+                    console.warn(`SyncEngine: Skipping issue ${issue.id} due to invalid [0,0] coordinates.`);
+                    await StorageService.deleteIssue(issue.id);
+                    continue;
+                }
 
                 // Fetch image Blob from local filesystem
                 const response = await fetch(issue.imageUri);
@@ -68,8 +93,6 @@ export const SyncEngine = {
                 const { error: dbError } = await supabase
                     .from('reports')
                     .insert({
-                        // Include the explicit ID if your Postgres assumes UUID is primary key. 
-                        // If reports has an auto-incrementing ID, omit issue.id
                         id: issue.id,
                         user_id: issue.user_id,
                         issue_type: issue.type || 'auto',

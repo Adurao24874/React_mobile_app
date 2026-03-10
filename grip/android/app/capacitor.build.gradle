@@ -9,9 +9,13 @@ android {
 
 apply from: "../capacitor-cordova-android-plugins/cordova.variables.gradle"
 dependencies {
+    implementation project(':capacitor-community-background-geolocation')
+    implementation project(':capacitor-community-keep-awake')
     implementation project(':capacitor-camera')
     implementation project(':capacitor-geolocation')
     implementation project(':capacitor-network')
+    implementation project(':capawesome-team-capacitor-android-foreground-service')
+    implementation project(':capawesome-capacitor-background-task')
     implementation project(':capacitor-native-settings')
 
 }

@@ -37,9 +37,20 @@ def create_tables():
         """
         cur.execute(create_sensors_query)
         
+        print("🔨 Creating 'server_status' table if it doesn't exist...")
+        create_server_status_query = """
+        CREATE TABLE IF NOT EXISTS public.server_status (
+            id INTEGER PRIMARY KEY,
+            last_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            status TEXT
+        );
+        INSERT INTO public.server_status (id, status) VALUES (1, 'offline') ON CONFLICT (id) DO NOTHING;
+        """
+        cur.execute(create_server_status_query)
+
         # Commit the transaction
         conn.commit()
-        print("✅ Success! The 'reports' and 'sensors' tables exist and are ready for FastAPI.")
+        print("✅ Success! All tables exist and are ready for FastAPI & Worker.")
         
     except Exception as e:
         print(f"❌ Error setting up tables: {e}")

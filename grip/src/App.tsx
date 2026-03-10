@@ -1,19 +1,37 @@
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, Navigate } from 'react-router-dom';
-import { Camera, MapPin, Activity, History, ArrowRight, ArrowLeft, CheckCircle2, Layers } from 'lucide-react';
+import { Camera, MapPin, Activity, History, ArrowRight, ArrowLeft, CheckCircle2, Layers, RefreshCw } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Geolocation } from '@capacitor/geolocation';
 import { StorageService } from './services/storage';
 import { SyncEngine } from './services/sync';
 import { Network } from '@capacitor/network';
-import { Motion } from '@capacitor/motion';
 import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase } from './lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import { NativeSettings, AndroidSettings } from 'capacitor-native-settings';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+import { ForegroundService } from '@capawesome-team/capacitor-android-foreground-service';
+import { KeepAwake } from '@capacitor-community/keep-awake';
+import type { BackgroundGeolocationPlugin } from '@capacitor-community/background-geolocation';
+
+const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
+
+interface GripSensorPlugin {
+    startRecording(): Promise<{ status: string }>;
+    stopRecording(): Promise<{ status: string }>;
+    getReadings(): Promise<{ readings: any[] }>;
+    checkPermissions(): Promise<{ sensors: string; activity: string }>;
+    requestPermissions(): Promise<{ sensors: string; activity: string }>;
+    getPromptStates(): Promise<{ permissionPrompted: boolean; batteryPrompted: boolean }>;
+    markPermissionPrompted(): Promise<void>;
+    markBatteryPrompted(): Promise<void>;
+    isBatteryOptimizationIgnored(): Promise<{ isIgnored: boolean }>;
+    requestBatteryOptimizationBypass(): Promise<void>;
+}
+const GripSensor = registerPlugin<GripSensorPlugin>('GripSensor');
 
 const blueDotIcon = new L.Icon({
     iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
@@ -148,35 +166,101 @@ function Login() {
     )
 }
 
+function WelcomeGuidance({ onComplete }: { onComplete: () => void }) {
+    return (
+        <div className="fixed inset-0 z-[100] bg-zinc-900/95 backdrop-blur-xl flex items-center justify-center p-6 animate-in fade-in duration-500">
+            <div className="w-full max-w-md bg-white dark:bg-zinc-800 rounded-[40px] shadow-2xl p-8 border border-white/20 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-green-400 to-blue-500"></div>
+
+                <div className="mb-8 text-center">
+                    <div className="w-20 h-20 bg-blue-50 dark:bg-blue-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <Activity className="w-10 h-10 text-blue-500" />
+                    </div>
+                    <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-2 tracking-tight">Setup Guard</h2>
+                    <p className="text-gray-500 dark:text-gray-400">Critical steps for continuous sensing</p>
+                </div>
+
+                <div className="space-y-6 mb-10">
+                    <div className="flex gap-4">
+                        <div className="w-10 h-10 rounded-xl bg-green-100 dark:bg-green-900/20 text-green-600 flex items-center justify-center flex-shrink-0 font-bold">1</div>
+                        <div>
+                            <h3 className="font-bold text-gray-900 dark:text-white">Location Access</h3>
+                            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">Ensure Location is set to <span className="text-green-600 font-bold">"Allow all the time"</span>. This prevents recording from cutting out when you lock the phone.</p>
+                        </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                        <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-900/20 text-blue-600 flex items-center justify-center flex-shrink-0 font-bold">2</div>
+                        <div>
+                            <h3 className="font-bold text-gray-900 dark:text-white">Battery Optimization</h3>
+                            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">Set GRIP to <span className="text-blue-600 font-bold">"Unrestricted"</span> in battery settings. This keeps our sensors active at 70Hz even during long runs.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                    <button
+                        onClick={() => NativeSettings.openAndroid({ option: AndroidSettings.ApplicationDetails })}
+                        className="py-4 bg-gray-100 dark:bg-zinc-700 text-gray-900 dark:text-white font-bold rounded-2xl hover:bg-gray-200 dark:hover:bg-zinc-600 transition-colors text-sm"
+                    >
+                        Open Settings
+                    </button>
+                    <button
+                        onClick={onComplete}
+                        className="py-4 bg-gradient-to-r from-green-500 to-blue-600 text-white font-bold rounded-2xl shadow-lg shadow-blue-500/30 hover:opacity-90 transition-opacity text-sm"
+                    >
+                        I've Done This
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function Dashboard() {
     const navigate = useNavigate();
     const [isOnline, setIsOnline] = useState(true);
     const [pendingSyncs, setPendingSyncs] = useState(0);
+    const [showGuidance, setShowGuidance] = useState(false);
 
     useEffect(() => {
-        // Start Sync Engine on mount
         SyncEngine.start();
-
         const updateStatus = async () => {
             const status = await Network.getStatus();
             setIsOnline(status.connected);
-
             const pendingIssues = await StorageService.getPendingIssues();
             const pendingBatches = await StorageService.getPendingSensorBatches();
             setPendingSyncs(pendingIssues.length + pendingBatches.length);
         };
-
-        // Initial fetch
         updateStatus();
-
-        // Poll for updates to UI
+        if (Capacitor.getPlatform() === 'android') {
+            GripSensor.getPromptStates().then(async states => {
+                if (!states.permissionPrompted) {
+                    const status = await GripSensor.checkPermissions();
+                    if (status.sensors !== 'granted' || status.activity !== 'granted') {
+                        await GripSensor.requestPermissions();
+                    }
+                    await GripSensor.markPermissionPrompted();
+                }
+                if (!states.batteryPrompted) {
+                    setShowGuidance(true);
+                }
+            });
+        }
         const interval = setInterval(updateStatus, 3000);
         return () => clearInterval(interval);
     }, []);
 
+    const completeGuidance = async () => {
+        setShowGuidance(false);
+        if (Capacitor.getPlatform() === 'android') {
+            await GripSensor.markBatteryPrompted();
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 pb-20">
-            {/* Header */}
+            {showGuidance && <WelcomeGuidance onComplete={completeGuidance} />}
             <div className="bg-gradient-to-r from-green-500 to-blue-600 p-6 pt-12 pb-8 rounded-b-[40px] shadow-lg text-white mb-6">
                 <div className="flex justify-between items-center mb-6">
                     <div className="flex items-center gap-4">
@@ -192,45 +276,30 @@ function Dashboard() {
                         <ArrowRight className="w-6 h-6" />
                     </button>
                 </div>
-
-                {/* Sync Status Banner */}
                 <div className={`p-3 rounded-2xl flex items-center justify-between backdrop-blur-md shadow-inner ${isOnline && pendingSyncs === 0 ? 'bg-white/10 text-white' : (isOnline && pendingSyncs > 0 ? 'bg-yellow-500/20 text-yellow-50' : 'bg-red-500/20 text-red-50')}`}>
                     <div className="flex items-center gap-2">
                         <div className={`w-3 h-3 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-400'}`}></div>
                         <span className="text-sm font-semibold">{isOnline ? 'System Online' : 'Offline Mode'}</span>
                     </div>
-                    {pendingSyncs > 0 && (
-                        <div className="text-xs font-bold bg-white/20 px-2 py-1 rounded-lg">
-                            {pendingSyncs} pending sync
-                        </div>
-                    )}
+                    {pendingSyncs > 0 && <div className="text-xs font-bold bg-white/20 px-2 py-1 rounded-lg">{pendingSyncs} pending sync</div>}
                 </div>
             </div>
-
-            {/* Content */}
             <div className="px-6 space-y-6">
                 <div>
                     <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Welcome Back!</h2>
                     <p className="text-gray-500 dark:text-gray-400 mt-1">Report infrastructure issues in your area</p>
                 </div>
-
-                {/* Action Cards */}
                 <div className="space-y-4">
                     <button onClick={() => navigate('/report/garbage')} className="w-full bg-white dark:bg-zinc-800 p-5 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center gap-4 hover:shadow-md transition-all text-left">
-                        <div className="w-14 h-14 rounded-xl bg-green-100 text-green-600 flex items-center justify-center flex-shrink-0">
-                            <span className="text-2xl">🗑️</span>
-                        </div>
+                        <div className="w-14 h-14 rounded-xl bg-green-100 text-green-600 flex items-center justify-center flex-shrink-0"><span className="text-2xl">🗑️</span></div>
                         <div className="flex-1">
                             <h3 className="font-bold text-lg text-gray-900 dark:text-white">Report Issue</h3>
                             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 leading-snug">Capture and report illegal garbage dump road crack and potholes</p>
                         </div>
                         <ArrowRight className="w-5 h-5 text-green-500" />
                     </button>
-
                     <button onClick={() => navigate('/report/pothole')} className="w-full bg-white dark:bg-zinc-800 p-5 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center gap-4 hover:shadow-md transition-all text-left">
-                        <div className="w-14 h-14 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center flex-shrink-0">
-                            <Activity className="w-7 h-7" />
-                        </div>
+                        <div className="w-14 h-14 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center flex-shrink-0"><Activity className="w-7 h-7" /></div>
                         <div className="flex-1">
                             <h3 className="font-bold text-lg text-gray-900 dark:text-white">Pothole Detection</h3>
                             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 leading-snug">Auto-detect road irregularities using sensors</p>
@@ -238,8 +307,6 @@ function Dashboard() {
                         <ArrowRight className="w-5 h-5 text-blue-500" />
                     </button>
                 </div>
-
-                {/* Secondary Actions */}
                 <div className="grid grid-cols-2 gap-4">
                     <button onClick={() => navigate('/map')} className="bg-white dark:bg-zinc-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex flex-col items-center justify-center gap-2 hover:bg-gray-50 dark:hover:bg-zinc-700 transition-colors cursor-pointer">
                         <MapPin className="w-6 h-6 text-green-500" />
@@ -250,25 +317,14 @@ function Dashboard() {
                         <span className="font-semibold text-gray-900 dark:text-white">History</span>
                     </button>
                 </div>
-
-                {/* Stats Card */}
                 <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700 mt-8">
                     <h3 className="font-bold text-gray-900 dark:text-white mb-6 text-lg">Quick Stats</h3>
                     <div className="flex justify-between text-center px-2">
-                        <div>
-                            <p className="text-3xl font-bold text-green-500 mb-1">12</p>
-                            <p className="text-xs font-semibold text-gray-500">Reported</p>
-                        </div>
+                        <div><p className="text-3xl font-bold text-green-500 mb-1">12</p><p className="text-xs font-semibold text-gray-500">Reported</p></div>
                         <div className="w-px bg-gray-200 dark:bg-zinc-700"></div>
-                        <div>
-                            <p className="text-3xl font-bold text-blue-500 mb-1">5</p>
-                            <p className="text-xs font-semibold text-gray-500">In Progress</p>
-                        </div>
+                        <div><p className="text-3xl font-bold text-blue-500 mb-1">5</p><p className="text-xs font-semibold text-gray-500">In Progress</p></div>
                         <div className="w-px bg-gray-200 dark:bg-zinc-700"></div>
-                        <div>
-                            <p className="text-3xl font-bold text-gray-800 dark:text-gray-300 mb-1">8</p>
-                            <p className="text-xs font-semibold text-gray-500">Resolved</p>
-                        </div>
+                        <div><p className="text-3xl font-bold text-gray-800 dark:text-gray-300 mb-1">8</p><p className="text-xs font-semibold text-gray-500">Resolved</p></div>
                     </div>
                 </div>
             </div>
@@ -285,93 +341,39 @@ function ReportGarbage() {
 
     const takePicture = async () => {
         try {
-            const image = await CapCamera.getPhoto({
-                quality: 60,
-                width: 1280,
-                height: 720,
-                allowEditing: false,
-                resultType: CameraResultType.Uri,
-                source: CameraSource.Camera
-            });
-
+            const image = await CapCamera.getPhoto({ quality: 60, width: 1280, height: 720, allowEditing: false, resultType: CameraResultType.Uri, source: CameraSource.Camera });
             if (image.webPath) {
                 setImageUri(image.webPath);
                 fetchLocation();
             }
-        } catch (e) {
-            console.error("Camera error:", e);
-        }
+        } catch (e) { console.error("Camera error:", e); }
     };
 
     const fetchLocation = async () => {
-    const isWeb = Capacitor.getPlatform() === 'web';
-
-    if (isWeb) {
-        // --- LAPTOP / BROWSER LOGIC ---
-        console.log("💻 Web detected: Using native HTML5 Geolocation...");
-        
-        if (!navigator.geolocation) {
-            alert("Your browser does not support Geolocation.");
-            return;
+        const isWeb = Capacitor.getPlatform() === 'web';
+        if (isWeb) {
+            if (!navigator.geolocation) { alert("Your browser does not support Geolocation."); return; }
+            navigator.geolocation.getCurrentPosition((position) => {
+                setLoc({ lat: position.coords.latitude, lng: position.coords.longitude });
+            }, (error) => { alert(`Laptop GPS Error: ${error.message}`); setLoc(null); }, { enableHighAccuracy: false, timeout: 1, maximumAge: 0 });
+        } else {
+            try {
+                const coordinates = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+                setLoc({ lat: coordinates.coords.latitude, lng: coordinates.coords.longitude });
+            } catch (e) { console.warn("Mobile Location fetch failed:", e); setLoc(null); }
         }
+    };
 
-        navigator.geolocation.getCurrentPosition(
-            (position) => {
-                console.log("📍 Laptop Location:", position.coords);
-                setLoc({
-                    lat: position.coords.latitude,
-                    lng: position.coords.longitude
-                });
-            },
-            (error) => {
-                console.error("Laptop GPS Error:", error);
-                // This will tell us EXACTLY why it failed (Timeout, Permission Denied, or Unavailable)
-                alert(`Laptop GPS Error: ${error.message}`); 
-                setLoc(null);
-            },
-            { enableHighAccuracy: false, timeout: 15000, maximumAge: 0 }
-        );
-
-    } else {
-        // --- MOBILE APP LOGIC ---
-        console.log("📱 Mobile detected: Using Capacitor Geolocation...");
-        try {
-            await Geolocation.requestPermissions();
-            const coordinates = await Geolocation.getCurrentPosition({
-                enableHighAccuracy: true,
-                timeout: 15000,
-                maximumAge: 0
-            });
-            
-            setLoc({
-                lat: coordinates.coords.latitude,
-                lng: coordinates.coords.longitude
-            });
-        } catch (e) {
-            console.error("Mobile Location error:", e);
-            setLoc(null); 
-            alert(`Mobile GPS Error: ${e.message || "Unknown error"}`);
-        }
-    }
-};
     const handleSave = async () => {
         if (!imageUri || !loc) return;
-
         setIsSaving(true);
         try {
-            await StorageService.saveIssue({
-                imageUri,
-                lat: loc.lat,
-                lng: loc.lng,
-                timestamp: Date.now(),
-                type: 'auto'
-            });
+            await StorageService.saveIssue({ imageUri, lat: loc.lat, lng: loc.lng, timestamp: Date.now(), type: 'auto' });
             setSavedMessage("Issue saved locally. It will automatically sync when online.");
-            setTimeout(() => {
-                navigate('/dashboard');
-            }, 2500);
-        } catch (e) {
+            setTimeout(() => navigate('/dashboard'), 2500);
+        } catch (e: any) {
             console.error("Storage error:", e);
+            alert(e.message || "Failed to save issue locally.");
             setIsSaving(false);
         }
     };
@@ -379,87 +381,51 @@ function ReportGarbage() {
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-zinc-900">
             <div className="bg-gradient-to-r from-green-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4 shadow-md">
-                <button onClick={() => navigate(-1)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
-                    <ArrowLeft className="w-6 h-6" />
-                </button>
+                <button onClick={() => navigate(-1)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ArrowLeft className="w-6 h-6" /></button>
                 <h1 className="text-xl font-bold">Report Issue</h1>
             </div>
-
             <div className="p-6 space-y-6">
-
-                {savedMessage && (
-                    <div className="bg-green-100 border border-green-200 text-green-800 px-4 py-3 rounded-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4">
-                        <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                        <p className="text-sm font-medium">{savedMessage}</p>
-                    </div>
-                )}
-
+                {savedMessage && <div className="bg-green-100 border border-green-200 text-green-800 px-4 py-3 rounded-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4"><CheckCircle2 className="w-5 h-5 flex-shrink-0" /><p className="text-sm font-medium">{savedMessage}</p></div>}
                 <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700">
                     {imageUri ? (
-                        <div className="w-full aspect-square bg-black rounded-2xl mb-6 overflow-hidden relative border border-gray-200 dark:border-zinc-700">
-                            <img src={imageUri} alt="Captured Garbage" className="w-full h-full object-cover" />
-                            <button onClick={takePicture} className="absolute bottom-4 right-4 bg-white text-gray-900 p-3 rounded-full shadow-lg hover:scale-105 transition-transform">
-                                <Camera className="w-5 h-5" />
-                            </button>
-                        </div>
+                        <div className="w-full aspect-square bg-black rounded-2xl mb-6 overflow-hidden relative border border-gray-200 dark:border-zinc-700"><img src={imageUri} alt="Captured Garbage" className="w-full h-full object-cover" /><button onClick={takePicture} className="absolute bottom-4 right-4 bg-white text-gray-900 p-3 rounded-full shadow-lg hover:scale-105 transition-transform"><Camera className="w-5 h-5" /></button></div>
                     ) : (
-                        <div className="w-full aspect-square bg-gray-100 dark:bg-zinc-700 rounded-2xl flex flex-col items-center justify-center text-gray-400 mb-6 border-2 border-dashed border-gray-200 dark:border-zinc-600">
-                            <Camera className="w-12 h-12 mb-2 opacity-50" />
-                            <p className="font-medium">No image captured</p>
-                        </div>
+                        <div className="w-full aspect-square bg-gray-100 dark:bg-zinc-700 rounded-2xl flex flex-col items-center justify-center text-gray-400 mb-6 border-2 border-dashed border-gray-200 dark:border-zinc-600"><Camera className="w-12 h-12 mb-2 opacity-50" /><p className="font-medium">No image captured</p></div>
                     )}
-
                     {!imageUri ? (
-                        <button onClick={takePicture} className="w-full py-4 bg-gradient-to-r from-green-500 to-blue-600 text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.98] transition-all">
-                            <Camera className="w-5 h-5" />
-                            Capture Image
-                        </button>
+                        <button onClick={takePicture} className="w-full py-4 bg-gradient-to-r from-green-500 to-blue-600 text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.98] transition-all"><Camera className="w-5 h-5" />Capture Image</button>
                     ) : (
-                        <button onClick={handleSave} disabled={isSaving || !loc} className="w-full py-4 bg-blue-600 disabled:bg-blue-400 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:bg-blue-700 active:scale-[0.98] transition-all">
-                            {isSaving ? "Saving Offline..." : "Save Report"}
-                        </button>
+                        <button onClick={handleSave} disabled={isSaving || !loc} className="w-full py-4 bg-blue-600 disabled:bg-blue-400 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:bg-blue-700 active:scale-[0.98] transition-all">{isSaving ? "Saving Offline..." : "Save Report"}</button>
                     )}
                 </div>
-
                 <div className="bg-white dark:bg-zinc-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center justify-between">
                     <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 rounded-full bg-green-50 dark:bg-green-900/20 text-green-500 flex items-center justify-center flex-shrink-0">
-                            <MapPin className="w-5 h-5" />
-                        </div>
-                        <div className="overflow-hidden">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Location</p>
-                            {loc ? (
-                                <p className="font-semibold text-gray-900 dark:text-white truncate text-sm">
-                                    {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}
-                                </p>
-                            ) : (
-                                <p className="font-medium text-gray-400 text-sm">Waiting for image...</p>
-                            )}
-                        </div>
+                        <div className="w-10 h-10 rounded-full bg-green-50 dark:bg-green-900/20 text-green-500 flex items-center justify-center flex-shrink-0"><MapPin className="w-5 h-5" /></div>
+                        <div className="overflow-hidden"><p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Location</p>{loc ? <p className="font-semibold text-gray-900 dark:text-white truncate text-sm">{loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}</p> : <p className="font-medium text-gray-400 text-sm">Waiting for image...</p>}</div>
                     </div>
                     <div className={`w-3 h-3 rounded-full ${loc ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]' : 'bg-gray-300 dark:bg-zinc-600 animate-pulse'}`}></div>
-                </div>
-
-                <div className="bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 p-4 rounded-2xl flex gap-3">
-                    <div className="text-blue-500 mt-0.5">ℹ️</div>
-                    <p className="text-sm text-blue-800 dark:text-blue-300 leading-relaxed font-medium">
-                        Make sure the garbage dump is clearly visible in the photo for faster processing by authorities. This report will sync securely in the background.
-                    </p>
                 </div>
             </div>
         </div>
     )
 }
 
-
-
 function LiveMapUpdater({ position }: { position: { lat: number, lng: number } | null }) {
     const map = useMap();
+    useEffect(() => { if (position) { map.flyTo([position.lat, position.lng], map.getZoom(), { animate: true, duration: 1.0 }); } }, [position, map]);
+    return null;
+}
+
+function MapBoundsUpdater({ points }: { points: any[] }) {
+    const map = useMap();
     useEffect(() => {
-        if (position) {
-            map.flyTo([position.lat, position.lng], map.getZoom(), { animate: true, duration: 1.0 });
+        if (points.length > 0) {
+            const bounds = L.latLngBounds(points.filter(p => p.latitude && p.longitude && p.latitude !== 0).map(p => [p.latitude, p.longitude]));
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+            }
         }
-    }, [position, map]);
+    }, [points, map]);
     return null;
 }
 
@@ -472,359 +438,135 @@ function PotholeDetection() {
     const [showSavePrompt, setShowSavePrompt] = useState(false);
     const [liveAccel, setLiveAccel] = useState({ x: 0, y: 0, z: 0 });
     const [liveGyro, setLiveGyro] = useState({ x: 0, y: 0, z: 0 });
-    const batchRef = useRef<Array<{
-        accelZ: number;
-        gyroX: number;
-        gyroY: number;
-        gyroZ: number;
-        lat?: number;
-        lng?: number;
-        timestamp: number;
-    }>>([]);
+    const batchRef = useRef<any[]>([]);
     const geoWatchId = useRef<string | null>(null);
-    const pitchRef = useRef<number>(0);
-    const rollRef = useRef<number>(0);
-    const lastSavedTimeRef = useRef<number>(0);
-    const currentLocationRef = useRef<{ lat: number, lng: number } | null>(null);
+    const saveIntervalRef = useRef<any>(null);
 
     useEffect(() => {
-        let interval: any;
-        if (isRecording) {
-            interval = setInterval(() => {
-                setSampleCount(batchRef.current.length);
-            }, 500);
-        } else {
-            setSampleCount(0);
-        }
-        return () => clearInterval(interval);
-    }, [isRecording]);
+        const checkRecovery = async () => { if (await StorageService.recoverActiveSession()) { try { await SyncEngine.syncAll(); } catch (e) { } } };
+        checkRecovery();
+    }, []);
 
     const startMonitoring = async () => {
         try {
             setUploadStatus('idle');
+            if (Capacitor.getPlatform() === 'android') {
+                const fsPerms = await ForegroundService.checkPermissions();
+                if (fsPerms.display !== 'granted') await ForegroundService.requestPermissions();
 
-            // 1. Check if Locations Services / GPS is actually ON
-            try {
-                await Geolocation.getCurrentPosition({
-                    enableHighAccuracy: true,
-                    timeout: 5000,
-                    maximumAge: 0
+                await ForegroundService.startForegroundService({
+                    id: 112233,
+                    title: "GRIP Sensing Active",
+                    body: "Protecting Goa's roads in background",
+                    smallIcon: "res://drawable/ic_launcher_foreground"
                 });
-            } catch (error) {
-                console.warn("GPS appears to be off", error);
-                alert("GPS is turned off. Please enable location services to use Pothole Detection.");
-                await NativeSettings.openAndroid({ option: AndroidSettings.Location });
-                setIsRecording(false);
-                return; // Stop execution
-            }
 
-            // 2. Request permissions for motion and location just in case
-            if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
-                await (DeviceMotionEvent as any).requestPermission();
-            }
-            await Geolocation.requestPermissions();
+                await KeepAwake.keepAwake();
 
-            // Start continuous GPS watcher
-            geoWatchId.current = await Geolocation.watchPosition({
-                enableHighAccuracy: true,
-                timeout: 5000,
-                maximumAge: 0
-            }, (position, err) => {
-                if (err) {
-                    console.error("Lost GPS during recording", err);
-                    return;
+                const battery = await GripSensor.isBatteryOptimizationIgnored();
+                if (!battery.isIgnored) {
+                    const confirm = window.confirm("Samsung/Aggressive devices detected. To record while screen is OFF, you MUST set Battery to 'Unrestricted' in the next screen. Open Settings?");
+                    if (confirm) {
+                        await GripSensor.requestBatteryOptimizationBypass();
+                        await NativeSettings.openAndroid({ option: AndroidSettings.ApplicationDetails });
+                    }
                 }
-
-                if (position) {
-                    setCurrentLocation({
-                        lat: position.coords.latitude,
-                        lng: position.coords.longitude,
-                        accuracy: position.coords.accuracy
-                    });
-                    currentLocationRef.current = {
-                        lat: position.coords.latitude,
-                        lng: position.coords.longitude
-                    };
-                }
+            }
+            if (typeof (DeviceMotionEvent as any).requestPermission === 'function') await (DeviceMotionEvent as any).requestPermission();
+            const watcherId = await BackgroundGeolocation.addWatcher({ backgroundMessage: "Tracking road quality", backgroundTitle: "GRIP Recording", requestPermissions: false, stale: false, distanceFilter: 0 }, (position) => {
+                if (position) setCurrentLocation({ lat: position.latitude, lng: position.longitude, accuracy: position.accuracy });
             });
-
-            setIsRecording(true);
+            geoWatchId.current = watcherId;
             batchRef.current = [];
-            pitchRef.current = 0;
-            rollRef.current = 0;
-            lastSavedTimeRef.current = 0;
+            setSampleCount(0);
+            if (Capacitor.getPlatform() === 'android') await GripSensor.startRecording();
+            setIsRecording(true);
+            saveIntervalRef.current = setInterval(async () => {
+                if (Capacitor.getPlatform() === 'android') {
+                    const stats = await GripSensor.getReadings();
+                    if (stats.readings && stats.readings.length > 0) {
+                        const latest = stats.readings[stats.readings.length - 1];
+                        setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
+                        setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
 
-            const handleOrientation = (event: any) => {
-                pitchRef.current = ((event.beta || 0) * Math.PI) / 180;
-                rollRef.current = ((event.gamma || 0) * Math.PI) / 180;
-            };
+                        // CRITICAL: Accumulate readings so we don't lose them!
+                        batchRef.current = [...batchRef.current, ...stats.readings];
+                        setSampleCount(batchRef.current.length);
 
-            const handleMotion = (event: DeviceMotionEvent) => {
-                try {
-                    const currentTime = Date.now();
-                    if (currentTime - lastSavedTimeRef.current < 20) return;
-                    lastSavedTimeRef.current = currentTime;
-
-                    // Support both raw acceleration and including gravity
-                    const accel = event.acceleration || event.accelerationIncludingGravity;
-                    if (!accel) return;
-
-                    const ax = accel.x || 0;
-                    const ay = accel.y || 0;
-                    const az = accel.z || 0;
-
-                    const pitch = pitchRef.current || 0;
-                    const roll = rollRef.current || 0;
-
-                    // Compute true vertical acceleration independent of phone orientation
-                    const vertical = ax * Math.sin(pitch) + ay * Math.sin(roll) + az * Math.cos(pitch) * Math.cos(roll);
-
-                    // Subtract gravity to get linear vertical acceleration (if using accelerationIncludingGravity)
-                    const verticalLinear = event.acceleration ? vertical : (vertical - 9.81);
-
-                    const xGyro = event.rotationRate?.alpha || 0;
-                    const yGyro = event.rotationRate?.beta || 0;
-                    const zGyro = event.rotationRate?.gamma || 0;
-
-                    setLiveAccel({ x: ax, y: ay, z: verticalLinear });
-                    setLiveGyro({ x: xGyro, y: yGyro, z: zGyro });
-
-                    batchRef.current.push({
-                        accelZ: verticalLinear,
-                        gyroX: xGyro,
-                        gyroY: yGyro,
-                        gyroZ: zGyro,
-                        lat: currentLocationRef.current?.lat,
-                        lng: currentLocationRef.current?.lng,
-                        timestamp: currentTime
-                    });
-                } catch (err) {
-                    console.error("Error processing sensor data:", err);
+                        // Periodically backup to local storage for crash recovery
+                        if (batchRef.current.length % 250 === 0) {
+                            StorageService.saveActiveSession(batchRef.current);
+                        }
+                    }
                 }
-            };
-
-            window.addEventListener('deviceorientation', handleOrientation);
-            window.addEventListener('devicemotion', handleMotion);
-
-            // Store references to remove them later
-            (window as any)._motionHandler = handleMotion;
-            (window as any)._orientationHandler = handleOrientation;
-
-        } catch (e) {
-            console.error("Failed to start sensors:", e);
-            alert("Could not access motion sensors or GPS. Ensure location is enabled.");
-            setIsRecording(false);
-        }
+            }, 1000);
+        } catch (e: any) { alert(`Error: ${e.message}`); setIsRecording(false); }
     };
 
     const stopMonitoring = async () => {
         setIsRecording(false);
-
-        window.removeEventListener('devicemotion', (window as any)._motionHandler);
-        window.removeEventListener('deviceorientation', (window as any)._orientationHandler);
-
-        if (geoWatchId.current) {
-            await Geolocation.clearWatch({ id: geoWatchId.current });
-            geoWatchId.current = null;
+        if (Capacitor.getPlatform() === 'android') {
+            await ForegroundService.stopForegroundService();
+            await KeepAwake.allowSleep();
         }
-
-        if (batchRef.current.length > 0) {
-            setShowSavePrompt(true);
+        if (saveIntervalRef.current) { clearInterval(saveIntervalRef.current); saveIntervalRef.current = null; }
+        if (Capacitor.getPlatform() === 'android') {
+            const result = await GripSensor.getReadings();
+            await GripSensor.stopRecording();
+            if (result.readings) {
+                batchRef.current = [...batchRef.current, ...result.readings];
+                setSampleCount(batchRef.current.length);
+            }
         }
+        if (geoWatchId.current) await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
+        setShowSavePrompt(true);
     };
 
     const saveSession = async () => {
-        setShowSavePrompt(false);
-        setUploadStatus('saving');
+        setShowSavePrompt(false); setUploadStatus('saving');
         await StorageService.saveSensorBatch({ readings: batchRef.current });
-        batchRef.current = [];
-
-        try {
-            await SyncEngine.syncAll();
-            setUploadStatus('success');
-        } catch (err) {
-            setUploadStatus('failed');
-        }
+        await StorageService.clearActiveSession();
+        try { await SyncEngine.syncAll(); setUploadStatus('success'); } catch (err) { setUploadStatus('failed'); }
     };
-
-    const discardSession = () => {
-        batchRef.current = [];
-        setSampleCount(0);
-        setShowSavePrompt(false);
-    };
-
-    // Clean up on unmount
-    useEffect(() => {
-        return () => {
-            Motion.removeAllListeners();
-            if (geoWatchId.current) {
-                Geolocation.clearWatch({ id: geoWatchId.current });
-            }
-        };
-    }, []);
 
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-zinc-900">
             <div className="bg-gradient-to-r from-green-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4 shadow-md">
-                <button onClick={() => navigate(-1)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
-                    <ArrowLeft className="w-6 h-6" />
-                </button>
-                <h1 className="text-xl font-bold">Trip Telemetry Session</h1>
+                <button onClick={() => navigate(-1)} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ArrowLeft className="w-6 h-6" /></button>
+                <h1 className="text-xl font-bold">Trip Telemetry</h1>
             </div>
-
             <div className="p-6 space-y-6">
-
-                {uploadStatus === 'success' && (
-                    <div className="bg-green-100 border border-green-200 text-green-800 px-4 py-3 rounded-xl flex items-center justify-between animate-in fade-in slide-in-from-top-4 mb-2">
-                        <div className="flex items-center gap-3">
-                            <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                            <p className="text-sm font-medium">Session Uploaded Successfully!</p>
-                        </div>
-                        <button onClick={() => setUploadStatus('idle')} className="text-green-600 hover:text-green-800 font-bold px-2 py-1 text-xs">Dismiss</button>
-                    </div>
-                )}
-
-                {uploadStatus === 'saving' && (
-                    <div className="bg-blue-100 border border-blue-200 text-blue-800 px-4 py-3 rounded-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4 mb-2 shadow-sm">
-                        <div className="w-5 h-5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0"></div>
-                        <p className="text-sm font-medium">Saving Offline & Uploading...</p>
-                    </div>
-                )}
-
-                <div className="relative w-full h-72 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-zinc-700 z-0 bg-zinc-800">
-                    <MapContainer
-                        center={currentLocation ? [currentLocation.lat, currentLocation.lng] : [15.2993, 74.1240]} // Goa default
-                        zoom={17}
-                        style={{ height: '100%', width: '100%', zIndex: 0 }}
-                        zoomControl={false}
-                        attributionControl={false}
-                    >
-                        <TileLayer
-                            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                        />
-                        {currentLocation && (
-                            <>
-                                <Circle
-                                    center={[currentLocation.lat, currentLocation.lng]}
-                                    radius={currentLocation.accuracy}
-                                    pathOptions={{ color: "#3b82f6", fillColor: "#3b82f6", fillOpacity: 0.15, weight: 1 }}
-                                />
-                                <Marker position={[currentLocation.lat, currentLocation.lng]} icon={blueDotIcon} />
-                            </>
-                        )}
+                <div className="relative w-full h-72 rounded-3xl overflow-hidden shadow-sm bg-zinc-800 z-0">
+                    <MapContainer center={currentLocation ? [currentLocation.lat, currentLocation.lng] : [15.4909, 73.8278]} zoom={17} style={{ height: '100%', width: '100%' }} zoomControl={false} attributionControl={false}>
+                        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                        {currentLocation && <Marker position={[currentLocation.lat, currentLocation.lng]} icon={blueDotIcon} />}
                         <LiveMapUpdater position={currentLocation} />
                     </MapContainer>
-
-                    {/* Overlay status text */}
-                    <div className="absolute bottom-4 left-0 right-0 z-[1000] flex justify-center pointer-events-none">
-                        <div className="bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md px-4 py-2 rounded-full shadow-lg border border-gray-200 dark:border-zinc-700 flex items-center gap-2 pointer-events-auto">
-                            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${isRecording ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></div>
-                            <span className="text-sm font-bold text-gray-900 dark:text-white">
-                                Status: <span className="text-gray-600 dark:text-gray-300 font-medium">{isRecording ? 'Recording' : 'Idle'}</span>
-                            </span>
-                        </div>
-                    </div>
                 </div>
-
                 <div className="grid grid-cols-1 gap-4">
                     <div className="bg-white dark:bg-zinc-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700">
-                        <div className="flex justify-between items-center mb-3">
-                            <h3 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Accelerometer</h3>
-                        </div>
-                        <div className="flex justify-between items-center font-mono">
-                            <div className="flex items-baseline gap-1.5">
-                                <span className="text-blue-500 text-sm font-bold">x:</span>
-                                <span className="text-gray-900 dark:text-white text-lg">{liveAccel.x.toFixed(2)}</span>
-                            </div>
-                            <div className="flex items-baseline gap-1.5">
-                                <span className="text-green-500 text-sm font-bold">y:</span>
-                                <span className="text-gray-900 dark:text-white text-lg">{liveAccel.y.toFixed(2)}</span>
-                            </div>
-                            <div className="flex items-baseline gap-1.5">
-                                <span className="text-purple-500 text-sm font-bold">z:</span>
-                                <span className="text-gray-900 dark:text-white text-lg">{liveAccel.z.toFixed(2)}</span>
-                            </div>
-                        </div>
+                        <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Accelerometer</h3>
+                        <div className="flex justify-between font-mono"><span className="text-blue-500">x: {liveAccel.x.toFixed(2)}</span><span className="text-green-500">y: {liveAccel.y.toFixed(2)}</span><span className="text-purple-500">z: {liveAccel.z.toFixed(2)}</span></div>
                     </div>
-
                     <div className="bg-white dark:bg-zinc-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700">
-                        <div className="flex justify-between items-center mb-3">
-                            <h3 className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Gyroscope</h3>
-                        </div>
-                        <div className="flex justify-between items-center font-mono">
-                            <div className="flex items-baseline gap-1.5">
-                                <span className="text-blue-500 text-sm font-bold">x:</span>
-                                <span className="text-gray-900 dark:text-white text-lg">{liveGyro.x.toFixed(2)}</span>
-                            </div>
-                            <div className="flex items-baseline gap-1.5">
-                                <span className="text-green-500 text-sm font-bold">y:</span>
-                                <span className="text-gray-900 dark:text-white text-lg">{liveGyro.y.toFixed(2)}</span>
-                            </div>
-                            <div className="flex items-baseline gap-1.5">
-                                <span className="text-purple-500 text-sm font-bold">z:</span>
-                                <span className="text-gray-900 dark:text-white text-lg">{liveGyro.z.toFixed(2)}</span>
-                            </div>
-                        </div>
+                        <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Gyroscope</h3>
+                        <div className="flex justify-between font-mono"><span className="text-blue-500">x: {liveGyro.x.toFixed(2)}</span><span className="text-green-500">y: {liveGyro.y.toFixed(2)}</span><span className="text-purple-500">z: {liveGyro.z.toFixed(2)}</span></div>
                     </div>
                 </div>
-
-                <div className="flex items-center justify-between text-xs text-gray-500 font-medium px-2 pb-2">
-                    <span>Samples Collected</span>
-                    <span className="font-mono bg-gray-100 dark:bg-zinc-800 px-2 py-0.5 rounded text-gray-900 dark:text-gray-200">{sampleCount}</span>
-                </div>
-
-                <button
-                    onClick={isRecording ? stopMonitoring : startMonitoring}
-                    className={`w-full py-5 text-white font-bold text-lg rounded-2xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.98] ${isRecording
-                        ? 'bg-red-500 hover:bg-red-600'
-                        : 'bg-gradient-to-r from-green-500 to-blue-600 hover:opacity-90'
-                        }`}
-                >
-                    {isRecording ? (
-                        <><span>⏹</span> End Session</>
-                    ) : (
-                        <><span>▶</span> Start Session</>
-                    )}
-                </button>
-
-                {showSavePrompt && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in">
-                        <div className="bg-white dark:bg-zinc-800 rounded-3xl p-6 w-full max-w-sm shadow-xl space-y-4 animate-in zoom-in-95 duration-200">
-                            <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">
-                                Session Ended
-                            </h3>
-                            <p className="text-gray-600 dark:text-gray-300">
-                                You collected <strong className="text-blue-500">{sampleCount}</strong> data samples during this trip. Would you like to save and upload them to the community map?
-                            </p>
-                            <div className="flex gap-3 pt-2">
-                                <button onClick={discardSession} className="flex-1 py-3 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded-xl font-bold text-sm transition-colors hover:bg-red-100 dark:hover:bg-red-900/40">Discard</button>
-                                <button onClick={saveSession} className="flex-1 py-3 bg-gradient-to-r from-green-500 to-blue-600 hover:opacity-90 text-white rounded-xl font-bold text-sm transition-opacity shadow-lg shadow-blue-500/25">Save Data</button>
-                            </div>
-                        </div>
+                {uploadStatus !== 'idle' && (
+                    <div className={`p-4 rounded-xl flex items-center gap-3 ${uploadStatus === 'success' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>
+                        {uploadStatus === 'saving' && <Activity className="animate-spin w-5 h-5" />}
+                        {uploadStatus === 'success' && <CheckCircle2 className="w-5 h-5" />}
+                        <p className="text-sm font-bold">{uploadStatus === 'saving' ? 'Syncing...' : (uploadStatus === 'success' ? 'Data Uploaded!' : 'Sync Failed')}</p>
                     </div>
                 )}
-                <button onClick={() => navigate('/map')} className="w-full py-4 bg-gray-100 dark:bg-zinc-800 text-blue-600 dark:text-blue-500 hover:bg-gray-200 dark:hover:bg-zinc-700 transition-colors font-bold rounded-xl border border-dashed border-blue-200 dark:border-blue-800 flex items-center justify-center gap-2">
-                    <MapPin className="w-5 h-5" />
-                    View Community Pothole Map
+                <div className="flex justify-between px-2 text-xs font-medium text-gray-500"><span>Samples</span><span className="font-mono">{sampleCount}</span></div>
+                <button onClick={isRecording ? stopMonitoring : startMonitoring} className={`w-full py-5 text-white font-bold rounded-2xl ${isRecording ? 'bg-red-500' : 'bg-gradient-to-r from-green-500 to-blue-600'}`}>
+                    {isRecording ? 'Stop Recording' : 'Start Recording'}
                 </button>
-
-                <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700 mt-8">
-                    <h3 className="font-bold text-gray-900 dark:text-white mb-4 text-lg">How it works</h3>
-                    <div className="space-y-4">
-                        <div className="flex gap-4">
-                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5 shadow-inner">1</div>
-                            <p className="text-sm text-gray-600 dark:text-gray-300 font-medium leading-relaxed">System detects road irregularities using mobile sensors (accelerometer & gyroscope)</p>
-                        </div>
-                        <div className="flex gap-4">
-                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5 shadow-inner">2</div>
-                            <p className="text-sm text-gray-600 dark:text-gray-300 font-medium leading-relaxed">Data is securely vaulted offline and synced when network is restored</p>
-                        </div>
-                        <div className="flex gap-4">
-                            <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5 shadow-inner">3</div>
-                            <p className="text-sm text-gray-600 dark:text-gray-300 font-medium leading-relaxed">The server analyzes physics to plot potholes globally for all riders to see on the map</p>
-                        </div>
-                    </div>
-                </div>
+                {showSavePrompt && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"><div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl w-full max-w-sm space-y-4 shadow-xl text-center"><h3 className="text-xl font-bold">Session Ended</h3><p>Upload {sampleCount} samples?</p><div className="flex gap-3"><button onClick={() => setShowSavePrompt(false)} className="flex-1 py-3 bg-gray-100 rounded-xl">Discard</button><button onClick={saveSession} className="flex-1 py-3 bg-blue-600 text-white rounded-xl">Save</button></div></div></div>
+                )}
             </div>
         </div>
     )
@@ -838,13 +580,32 @@ function LocateControl() {
     const handleLocate = async () => {
         setLocating(true);
         try {
-            await Geolocation.requestPermissions();
-            const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
-            const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+            const perms = await Geolocation.checkPermissions();
+            if (perms.location !== 'granted') {
+                const req = await Geolocation.requestPermissions();
+                if (req.location !== 'granted') {
+                    alert("Location permission is required to find your position.");
+                    return;
+                }
+            }
+
+            const pos = await Geolocation.getCurrentPosition({
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 0
+            });
+
+            const coords = {
+                lat: pos.coords.latitude,
+                lng: pos.coords.longitude,
+                accuracy: pos.coords.accuracy
+            };
+
             setCurrentPos(coords);
-            map.flyTo([coords.lat, coords.lng], 16, { animate: true });
-        } catch (e) {
-            console.error("Locate error", e);
+            map.flyTo([coords.lat, coords.lng], 16, { animate: true, duration: 1.5 });
+        } catch (e: any) {
+            console.error("Locate failed:", e);
+            alert(`Could not get location: ${e.message || 'Timeout'}`);
         } finally {
             setLocating(false);
         }
@@ -862,23 +623,17 @@ function LocateControl() {
                     <Marker position={[currentPos.lat, currentPos.lng]} icon={blueDotIcon} />
                 </>
             )}
-            <div className="absolute bottom-6 right-4 z-[1000] pointer-events-auto">
+            <div className="absolute bottom-10 right-4 z-[1001] pointer-events-auto">
                 <button
                     onClick={handleLocate}
                     disabled={locating}
-                    className="bg-zinc-800/90 backdrop-blur-md p-3 rounded-2xl shadow-lg border border-white/10 hover:bg-zinc-700 transition-colors flex items-center justify-center text-white"
+                    className={`w-14 h-14 rounded-full shadow-2xl border flex items-center justify-center transition-all ${locating ? 'bg-zinc-700 animate-pulse' : 'bg-white dark:bg-zinc-800 hover:scale-110 active:scale-95'
+                        } ${currentPos ? 'border-blue-500 border-2' : 'border-white/10'}`}
                 >
                     {locating ? (
-                        <div className="w-6 h-6 rounded-full border-2 border-blue-500 border-t-transparent animate-spin"></div>
+                        <RefreshCw className="w-6 h-6 text-white animate-spin" />
                     ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <circle cx="12" cy="12" r="4" fill="currentColor" />
-                            <circle cx="12" cy="12" r="8" />
-                            <line x1="12" y1="2" x2="12" y2="4" />
-                            <line x1="12" y1="20" x2="12" y2="22" />
-                            <line x1="2" y1="12" x2="4" y2="12" />
-                            <line x1="20" y1="12" x2="22" y2="12" />
-                        </svg>
+                        <MapPin className={`w-6 h-6 ${currentPos ? 'text-blue-500' : 'text-gray-900 dark:text-white'}`} />
                     )}
                 </button>
             </div>
@@ -895,185 +650,97 @@ function MapViewer() {
     const [showReports, setShowReports] = useState(true);
     const [showFilters, setShowFilters] = useState(false);
 
-    useEffect(() => {
-        const fetchMapLayer = async () => {
-            try {
-                // Fetch Sensor Conditions
-                const condReq = supabase
+    const fetchMapLayer = async () => {
+        setLoading(true);
+        try {
+            // Fetch Road Conditions with pagination to bypass the 1000 row limit
+            let allConditions: any[] = [];
+            let from = 0;
+            const PAGE_SIZE = 1000;
+            const MAX_POINTS = 50000;
+
+            while (from < MAX_POINTS) {
+                const { data, error } = await supabase
                     .from('road_conditions')
                     .select('*')
-                    .order('timestamp', { ascending: false });
+                    .order('timestamp', { ascending: false })
+                    .range(from, from + PAGE_SIZE - 1);
 
-                // Fetch AI Image Reports
-                const repReq = supabase
-                    .from('reports')
-                    .select('*')
-                    .not('latitude', 'is', null)
-                    .not('longitude', 'is', null)
-                    .eq('status', 'completed')
-                    .order('created_at', { ascending: false });
+                if (error) throw error;
+                if (!data || data.length === 0) break;
 
-                const [condRes, repRes] = await Promise.all([condReq, repReq]);
-
-                if (condRes.error) throw condRes.error;
-                if (repRes.error) throw repRes.error;
-
-                if (condRes.data) setConditions(condRes.data);
-                if (repRes.data) setReports(repRes.data);
-            } catch (e) {
-                console.error("Failed to load map points", e);
-            } finally {
-                setLoading(false);
+                allConditions = [...allConditions, ...data];
+                if (data.length < PAGE_SIZE) break;
+                from += PAGE_SIZE;
             }
-        };
-        fetchMapLayer();
-    }, []);
+            setConditions(allConditions);
 
-    // Goa Center roughly
-    const center = [15.4909, 73.8278];
+            // Fetch Reports (usually fewer reports, so single fetch is often okay, but let's be safe)
+            const repRes = await supabase
+                .from('reports')
+                .select('*')
+                .not('latitude', 'is', null)
+                .not('longitude', 'is', null)
+                .eq('status', 'completed')
+                .order('created_at', { ascending: false });
+
+            if (repRes.data) setReports(repRes.data);
+        } catch (e) {
+            console.error('Fetch error:', e);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => { fetchMapLayer(); }, []);
 
     return (
         <div className="h-screen flex flex-col bg-zinc-900 relative">
             <div className="absolute top-0 w-full z-50 bg-gradient-to-b from-black/80 to-transparent p-4 pt-12 text-white flex justify-between items-start pointer-events-none">
                 <div className="flex items-center gap-4 pointer-events-auto">
-                    <button onClick={() => navigate(-1)} className="p-3 bg-white/20 backdrop-blur-md rounded-full hover:bg-white/30 transition-colors shadow-lg">
-                        <ArrowLeft className="w-6 h-6" />
-                    </button>
-                    <div>
-                        <h1 className="text-2xl font-bold drop-shadow-md tracking-tight">Infrastructure Map</h1>
-                        <p className="text-white/80 font-medium drop-shadow-sm text-sm">Real-time Road Conditions</p>
+                    <button onClick={() => navigate(-1)} className="p-3 bg-white/20 backdrop-blur-md rounded-full hover:bg-white/30 transition-colors shadow-lg pointer-events-auto"><ArrowLeft className="w-6 h-6" /></button>
+                    <div className="pointer-events-auto">
+                        <h1 className="text-2xl font-bold tracking-tight">Infrastructure Map</h1>
+                        <div className="flex items-center gap-2">
+                            <p className="text-white/80 font-medium text-sm">Real-time Road Conditions</p>
+                            <span className="bg-green-500 text-white text-[10px] px-2 py-0.5 rounded-full font-bold shadow-sm animate-pulse-slow">{conditions.length > 0 ? `${conditions.filter(p => p.latitude !== 0).length} Points` : 'No Data'}</span>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            {loading ? (
-                <div className="flex-1 flex items-center justify-center bg-zinc-900 border-t border-zinc-800">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div>
+                <div className="flex items-center gap-2 pointer-events-auto">
+                    <button onClick={fetchMapLayer} className={`p-3 bg-white/20 backdrop-blur-md rounded-full hover:bg-white/30 ${loading ? 'opacity-50' : ''}`} disabled={loading}><RefreshCw className={`w-6 h-6 ${loading ? 'animate-spin' : ''}`} /></button>
+                    <button onClick={() => setShowFilters(!showFilters)} className="p-3 bg-white/20 backdrop-blur-md rounded-full shadow-lg border border-white/20 hover:bg-white/30"><Layers className="w-6 h-6" /></button>
                 </div>
-            ) : (
+            </div>
+            {loading ? (<div className="flex-1 flex items-center justify-center bg-zinc-900"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div></div>) : (
                 <div className="flex-1 z-0 relative">
-                    <MapContainer center={center as any} zoom={11} className="w-full h-full" zoomControl={false}>
-                        <TileLayer
-                            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-                            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-                        />
-
-                        {/* Render Sensor Data */}
-                        {showSensors && conditions.map((pt, i) => (
-                            <CircleMarker
-                                key={`cond-${i}`}
-                                center={[pt.latitude, pt.longitude]}
-                                radius={pt.condition_label === 'POTHOLE' || pt.condition_label === 'BAD' ? 8 : 5}
-                                pathOptions={{
-                                    color: pt.color_hex,
-                                    fillColor: pt.color_hex,
-                                    fillOpacity: 0.8,
-                                    weight: 2
-                                }}
-                            >
-                                <Popup className="rounded-xl overflow-hidden">
-                                    <div className="p-1 min-w-[140px]">
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: pt.color_hex }}></div>
-                                            <span className="font-bold text-gray-800 uppercase tracking-wider text-xs">Sensor: {pt.condition_label}</span>
-                                        </div>
-                                        <div className="text-xs text-gray-600 space-y-1">
-                                            <p><span className="font-semibold">Vibration:</span> {pt.vibration_intensity.toFixed(2)} m/s²</p>
-                                            <p><span className="font-semibold">Time:</span> {new Date(pt.timestamp).toLocaleTimeString()}</p>
-                                        </div>
-                                    </div>
-                                </Popup>
+                    <MapContainer center={[15.4909, 73.8278]} zoom={11} className="w-full h-full" zoomControl={false}>
+                        <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
+                        {showSensors && conditions.filter(pt => pt.latitude && pt.longitude && pt.latitude !== 0).map((pt, i) => (
+                            <CircleMarker key={`cond-${i}`} center={[pt.latitude, pt.longitude]} radius={pt.condition_label === 'POTHOLE' || pt.condition_label === 'BAD' ? 8 : 5} pathOptions={{ color: pt.color_hex, fillColor: pt.color_hex, fillOpacity: 0.8, weight: 2 }} >
+                                <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: pt.color_hex }}></div><span className="font-bold text-xs uppercase">{pt.condition_label}</span></div><p className="text-xs">Vibration: {pt.vibration_intensity?.toFixed(2)}</p></div></Popup>
                             </CircleMarker>
                         ))}
-
-                        {/* Render AI Image Reports */}
-                        {showReports && reports.map((rep, i) => (
-                            <CircleMarker
-                                key={`rep-${i}`}
-                                center={[rep.latitude, rep.longitude]}
-                                radius={9}
-                                pathOptions={{
-                                    color: '#ffffff', // White outline
-                                    fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', // Purple for Garbage, Red for AI Pothole
-                                    fillOpacity: 1,
-                                    weight: 2
-                                }}
-                            >
-                                <Popup className="rounded-xl overflow-hidden">
-                                    <div className="max-w-[200px]">
-                                        {rep.image_url && (
-                                            <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded-t-xl mb-2 bg-gray-100" />
-                                        )}
-                                        <div className="p-2">
-                                            <div className="flex items-center gap-2 mb-2">
-                                                <div className="w-3 h-3 rounded-full shadow-sm" style={{ backgroundColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444' }}></div>
-                                                <span className="font-bold text-gray-800 uppercase tracking-wider text-xs">Image: {rep.issue_type}</span>
-                                            </div>
-                                            <div className="text-xs text-gray-600 space-y-1">
-                                                <p><span className="font-semibold">Detected:</span> {rep.ai_predictions || rep.issue_type}</p>
-                                                <p><span className="font-semibold">Reported:</span> {new Date(rep.created_at).toLocaleDateString()}</p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </Popup>
+                        {showReports && reports.filter(rep => rep.latitude && rep.longitude && rep.latitude !== 0).map((rep, i) => (
+                            <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: 2 }}>
+                                <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
                             </CircleMarker>
                         ))}
                         <LocateControl />
+                        <MapBoundsUpdater points={conditions.length > 0 ? conditions : reports} />
                     </MapContainer>
-
-                    {/* Layer Filter Controls */}
-                    <div className="absolute top-24 right-4 z-[1000] pointer-events-auto">
-                        <button
-                            onClick={() => setShowFilters(!showFilters)}
-                            className="bg-white/90 dark:bg-zinc-800/90 backdrop-blur-md p-3 rounded-full shadow-lg border border-white/20 hover:bg-white transition-colors"
-                        >
-                            <Layers className="w-6 h-6 text-gray-700 dark:text-gray-200" />
-                        </button>
-
-                        {showFilters && (
-                            <div className="absolute top-14 right-0 bg-white/95 dark:bg-zinc-800/95 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-100 dark:border-zinc-700 w-56 flex flex-col gap-3">
-                                <h3 className="font-bold text-sm text-gray-900 dark:text-white uppercase tracking-wider border-b border-gray-100 dark:border-zinc-700 pb-2">Map Layers</h3>
-
-                                <label className="flex items-center justify-between cursor-pointer group">
-                                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-blue-500 transition-colors">Sensor Data</span>
-                                    <div className={`w-10 h-6 rounded-full transition-colors flex items-center px-1 ${showSensors ? 'bg-blue-500' : 'bg-gray-300 dark:bg-zinc-600'}`}>
-                                        <div className={`w-4 h-4 rounded-full bg-white transition-transform ${showSensors ? 'translate-x-4' : 'translate-x-0'}`}></div>
-                                    </div>
-                                    <input type="checkbox" className="hidden" checked={showSensors} onChange={() => setShowSensors(!showSensors)} />
-                                </label>
-
-                                <label className="flex items-center justify-between cursor-pointer group">
-                                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-blue-500 transition-colors">YOLO Images</span>
-                                    <div className={`w-10 h-6 rounded-full transition-colors flex items-center px-1 ${showReports ? 'bg-blue-500' : 'bg-gray-300 dark:bg-zinc-600'}`}>
-                                        <div className={`w-4 h-4 rounded-full bg-white transition-transform ${showReports ? 'translate-x-4' : 'translate-x-0'}`}></div>
-                                    </div>
-                                    <input type="checkbox" className="hidden" checked={showReports} onChange={() => setShowReports(!showReports)} />
-                                </label>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Map Legend Floating */}
-                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] bg-white/95 dark:bg-zinc-800/95 backdrop-blur-md px-5 py-3 rounded-3xl shadow-xl border border-white/20 flex flex-wrap justify-center gap-x-4 gap-y-2 text-xs font-bold text-gray-700 dark:text-gray-300 pointer-events-auto max-w-[95vw] lg:max-w-[1000px]">
-                        {showSensors && (
-                            <>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: '#dc2626' }}></div> Pothole</div>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: '#ef4444' }}></div> Bad</div>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: '#3b82f6' }}></div> Hump</div>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: '#f97316' }}></div> Rumble</div>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: '#eab308' }}></div> Minor</div>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: '#22c55e' }}></div> Good</div>
-                            </>
-                        )}
-                        {showSensors && showReports && (
-                            <div className="w-px h-4 bg-gray-300 dark:bg-zinc-600 hidden sm:block mx-1"></div>
-                        )}
-                        {showReports && (
-                            <>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm border border-white" style={{ backgroundColor: '#a855f7' }}></div> YOLO Garbage</div>
-                                <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full shadow-sm border border-white" style={{ backgroundColor: '#ef4444' }}></div> YOLO Pothole</div>
-                            </>
-                        )}
+                    {showFilters && (
+                        <div className="absolute top-24 right-4 z-[1000] bg-white/95 dark:bg-zinc-800/95 p-4 rounded-2xl shadow-xl border border-gray-100 dark:border-zinc-700 w-56 flex flex-col gap-3 pointer-events-auto">
+                            <h3 className="font-bold text-sm uppercase tracking-wider border-b pb-2">Layers</h3>
+                            <label className="flex items-center justify-between cursor-pointer"><span className="text-sm">Sensors</span><input type="checkbox" checked={showSensors} onChange={() => setShowSensors(!showSensors)} /></label>
+                            <label className="flex items-center justify-between cursor-pointer"><span className="text-sm">Reports</span><input type="checkbox" checked={showReports} onChange={() => setShowReports(!showReports)} /></label>
+                        </div>
+                    )}
+                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] bg-white/95 dark:bg-zinc-800/95 px-5 py-3 rounded-full shadow-xl flex gap-4 text-[10px] font-bold text-gray-700 pointer-events-auto">
+                        <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#dc2626' }}></div> Pothole</div>
+                        <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#ef4444' }}></div> Bad</div>
+                        <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#3b82f6' }}></div> Hump</div>
+                        <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#22c55e' }}></div> Good</div>
                     </div>
                 </div>
             )}
@@ -1085,110 +752,41 @@ function HistoryFeed() {
     const navigate = useNavigate();
     const [historyItems, setHistoryItems] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        fetchHistory();
-    }, []);
-
+    useEffect(() => { fetchHistory(); }, []);
     const fetchHistory = async () => {
         setLoading(true);
         try {
             const { data: { session } } = await supabase.auth.getSession();
             const userId = session?.user.id;
-
             const localIssues = await StorageService.getPendingIssues();
             const localSensors = await StorageService.getPendingSensorBatches();
-
             let cloudReports: any[] = [];
             let cloudSensors: any[] = [];
-
             if (userId) {
                 const { data: reports } = await supabase.from('reports').select('*').eq('user_id', userId).order('created_at', { ascending: false });
                 if (reports) cloudReports = reports;
-
-                const { data: sensors } = await supabase.from('sensors').select('*').eq('user_id', userId).order('created_at', { ascending: false });
+                const { data: sensors } = await supabase.from('sensors').select('*').eq('user_id', userId).neq('batch_id', 'SERVER_HEARTBEAT').order('created_at', { ascending: false });
                 if (sensors) cloudSensors = sensors;
             }
-
-            // Map everything to a unified timeline
             const timeline = [
-                ...localIssues.map(i => ({
-                    id: i.id,
-                    type: i.type === 'Garbage' ? 'Garbage Report' : 'Pothole Report',
-                    date: new Date(i.timestamp),
-                    status: 'Queued for Sync (Offline)',
-                    isLocal: true,
-                    icon: '🗑️'
-                })),
-                ...localSensors.map(s => ({
-                    id: s.id,
-                    type: 'Sensor Session',
-                    date: new Date(s.readings[0]?.timestamp || Date.now()),
-                    status: 'Queued for Sync (Offline)',
-                    isLocal: true,
-                    icon: 'Activity'
-                })),
-                ...cloudReports.map(r => ({
-                    id: r.id,
-                    type: r.issue_type === 'Garbage' ? 'Garbage Report' : 'Pothole Report',
-                    date: new Date(r.timestamp || r.created_at),
-                    status: r.status === 'pending' ? 'Uploaded / Pending Processing' : 'Processed by AI',
-                    isLocal: false,
-                    icon: '🗑️'
-                })),
-                ...cloudSensors.map(s => ({
-                    id: s.id,
-                    type: 'Sensor Session',
-                    date: new Date(s.created_at),
-                    status: s.status === 'pending' ? 'Uploaded / Pending Processing' : 'Processed by AI',
-                    isLocal: false,
-                    icon: 'Activity'
-                }))
-            ];
-
-            timeline.sort((a, b) => b.date.getTime() - a.date.getTime());
+                ...localIssues.map(i => ({ id: i.id, type: i.type === 'Garbage' ? 'Garbage Report' : 'Pothole Report', date: new Date(i.timestamp), status: 'Queued', isLocal: true, icon: '🗑️' })),
+                ...localSensors.map(s => ({ id: s.id, type: 'Sensor Session', date: new Date(s.readings[0]?.timestamp || Date.now()), status: 'Queued', isLocal: true, icon: 'Activity' })),
+                ...cloudReports.map(r => ({ id: r.id, type: r.issue_type === 'Garbage' ? 'Garbage Report' : 'Pothole Report', date: new Date(r.timestamp || r.created_at), status: r.status === 'pending' ? 'Processing' : 'Success', isLocal: false, icon: '🗑️' })),
+                ...cloudSensors.map(s => ({ id: s.id, type: 'Sensor Session', date: new Date(s.created_at), status: s.status === 'pending' ? 'Processing' : 'Success', isLocal: false, icon: 'Activity' }))
+            ].sort((a, b) => b.date.getTime() - a.date.getTime());
             setHistoryItems(timeline);
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setLoading(false);
-        }
+        } catch (e) { console.error(e); } finally { setLoading(false); }
     };
-
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 pb-20">
-            <div className="bg-gradient-to-r from-green-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4 shadow-md">
-                <button onClick={() => navigate('/dashboard')} className="p-2 hover:bg-white/10 rounded-full transition-colors">
-                    <ArrowLeft className="w-6 h-6" />
-                </button>
-                <h1 className="text-xl font-bold">Activity History</h1>
-            </div>
-
+            <div className="bg-gradient-to-r from-green-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4"><button onClick={() => navigate('/dashboard')} className="p-2"><ArrowLeft className="w-6 h-6" /></button><h1 className="text-xl font-bold">History</h1></div>
             <div className="p-4 space-y-4">
-                {loading ? (
-                    <div className="flex justify-center p-8"><div className="w-8 h-8 rounded-full border-4 border-blue-500 border-t-transparent animate-spin"></div></div>
-                ) : historyItems.length === 0 ? (
-                    <div className="text-center p-8 text-gray-500 font-medium bg-white dark:bg-zinc-800 rounded-3xl py-12 shadow-sm border border-gray-100 dark:border-zinc-700">
-                        <History className="w-12 h-12 mx-auto mb-4 opacity-20" />
-                        No history found.
+                {loading ? (<div className="flex justify-center p-8"><Activity className="animate-spin" /></div>) : historyItems.map((item, idx) => (
+                    <div key={`${item.id}-${idx}`} className="bg-white dark:bg-zinc-800 p-4 rounded-2xl flex items-center gap-4 border border-gray-100 dark:border-zinc-700">
+                        <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">{item.icon === 'Activity' ? <Activity className="w-6 h-6" /> : <span className="text-xl">{item.icon}</span>}</div>
+                        <div className="flex-1"><h3 className="font-bold text-gray-900 dark:text-white truncate">{item.type}</h3><p className="text-xs text-gray-500">{item.date.toLocaleString()}</p><div className="flex items-center gap-1.5 mt-2"><div className={`w-2 h-2 rounded-full ${item.status === 'Success' ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}></div><span className="text-xs font-semibold">{item.status}</span></div></div>
                     </div>
-                ) : (
-                    historyItems.map((item, idx) => (
-                        <div key={`${item.id}-${idx}`} className="bg-white dark:bg-zinc-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center gap-4">
-                            <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${item.icon === 'Activity' ? 'bg-blue-100 text-blue-600' : 'bg-green-100 text-green-600'}`}>
-                                {item.icon === 'Activity' ? <Activity className="w-6 h-6" /> : <span className="text-xl">{item.icon}</span>}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <h3 className="font-bold text-gray-900 dark:text-white truncate">{item.type}</h3>
-                                <p className="text-xs text-gray-500">{item.date.toLocaleString()}</p>
-                                <div className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-semibold bg-gray-50 dark:bg-zinc-700 w-auto max-w-full">
-                                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${item.status.includes('Queued') ? 'bg-yellow-500 animate-[pulse_2s_ease-in-out_infinite]' : item.status.includes('Processed') ? 'bg-green-500' : 'bg-blue-500'}`}></div>
-                                    <span className="text-gray-700 dark:text-gray-300 truncate">{item.status}</span>
-                                </div>
-                            </div>
-                        </div>
-                    ))
-                )}
+                ))}
             </div>
         </div>
     );
@@ -1197,29 +795,15 @@ function HistoryFeed() {
 function App() {
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
-
     useEffect(() => {
-        supabase.auth.getSession().then(({ data: { session } }) => {
-            setSession(session);
-            setLoading(false);
-        });
-
-        const {
-            data: { subscription },
-        } = supabase.auth.onAuthStateChange((_event, session) => {
-            setSession(session);
-        });
-
+        supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false); });
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
         return () => subscription.unsubscribe();
     }, []);
-
-    if (loading) {
-        return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-zinc-900"><div className="w-8 h-8 rounded-full border-4 border-green-500 border-t-transparent animate-spin"></div></div>;
-    }
-
+    if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-zinc-900"><div className="animate-spin rounded-full h-8 w-8 border-4 border-green-500 border-t-transparent"></div></div>;
     return (
         <Router>
-            <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 font-sans antialiased text-gray-900 dark:text-gray-100 selection:bg-blue-500/30">
+            <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 font-sans antialiased text-gray-900 dark:text-gray-100">
                 <Routes>
                     <Route path="/" element={!session ? <Home /> : <Navigate to="/dashboard" />} />
                     <Route path="/login" element={!session ? <Login /> : <Navigate to="/dashboard" />} />

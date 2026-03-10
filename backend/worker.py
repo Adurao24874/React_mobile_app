@@ -3,6 +3,8 @@ import time
 import json
 import asyncio
 import math
+import threading
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from PIL import Image
 from ultralytics import YOLO
@@ -21,6 +23,26 @@ try:
 except Exception as e:
     print(f"❌ Critical Error loading AI Models: {e}")
     exit(1)
+
+# 3. Start Heartbeat Thread
+def heartbeat_worker():
+    print("💓 Starting Server Heartbeat...")
+    while True:
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            # We use a hardcoded UUID in the sensors table for the heartbeat to avoid DDL/Postgres requirements
+            supabase.table('sensors').upsert({
+                "id": "11111111-1111-1111-1111-111111111111",
+                "batch_id": "SERVER_HEARTBEAT",
+                "status": "online",
+                "local_file_path": now_iso
+            }).execute()
+        except Exception as e:
+            pass # Keep it quiet
+        time.sleep(10)
+
+threading.Thread(target=heartbeat_worker, daemon=True).start()
+
 
 # Helper to normalize YOLO tensor outputs
 def parse_yolo_results(results):
@@ -106,12 +128,13 @@ def process_report(report):
         return
 
     # 4. Clean up Storage to preserve the 1GB Free Tier
-    print("    🧹 Deleting massive Storage payload...")
-    try:
-        supabase.storage.from_('reports').remove([image_path])
-        print("    ✨ Storage clean.")
-    except Exception as e:
-        print(f"    ⚠️ Failed to delete storage: {e}")
+    print("    ⏳ Retaining massive Storage payload (24-hour retention policy)...")
+    # try:
+    #     supabase.storage.from_('reports').remove([image_path])
+    #     print("    ✨ Storage clean.")
+    # except Exception as e:
+    #     print(f"    ⚠️ Failed to delete storage: {e}")
+
         
     print(f"--> 🏁 Finished Report [{report['id']}]\n")
 
@@ -142,8 +165,11 @@ def process_sensors(batch):
         df = pd.DataFrame(readings)
         
         # classify_dataframe expects timestamp in ms, accel_x/y/z.
+        # classify_dataframe expects timestamp in ms, accel_x/y/z.
         # Let's map frontend names to legacy telemetry.py names
         df = df.rename(columns={
+            'accelX': 'accel_x',
+            'accelY': 'accel_y',
             'accelZ': 'accel_z',
             'gyroX': 'gyro_x',
             'gyroY': 'gyro_y',
@@ -159,16 +185,12 @@ def process_sensors(batch):
             df['latitude'] = df['latitude'].ffill().bfill()
             df['longitude'] = df['longitude'].ffill().bfill()
             
-        # If the frontend didn't supply x/y accel, fill with 0
-        if 'accel_x' not in df.columns: df['accel_x'] = 0.0
-        if 'accel_y' not in df.columns: df['accel_y'] = 0.0
-            
         # Run legacy apptesting extraction math (70 samples min = 0.7s)
         events, _ = classify_dataframe(
             df,
             min_samples=50, # Set to 50 to match the new 50Hz app sampling rate
             use_gyro=True,
-            axis_mode='z'
+            axis_mode='gyro'
         )
         
         print(f"    🗺️ Extracted {len(events)} physical street map points.")
@@ -178,7 +200,7 @@ def process_sensors(batch):
             print("    📤 Uploading coordinate clusters to Supabase Map Layer...")
             success_count = 0
             for event in events:
-                if math.isnan(event['latitude']) or math.isnan(event['longitude']):
+                if math.isnan(event['latitude']) or math.isnan(event['longitude']) or (event['latitude'] == 0 and event['longitude'] == 0):
                     continue
                     
                 try:
@@ -216,12 +238,12 @@ def process_sensors(batch):
         return
 
     # 3. Clean up Storage limits
-    print("    🧹 Deleting JSON telemetry from Storage...")
-    try:
-        supabase.storage.from_('reports').remove([file_path])
-        print("    ✨ Storage clean.")
-    except Exception as e:
-        print(f"    ⚠️ Failed to delete storage: {e}")
+    print("    ⏳ Retaining JSON telemetry in Storage (24-hour retention policy)...")
+    # try:
+    #     supabase.storage.from_('reports').remove([file_path])
+    #     print("    ✨ Storage clean.")
+    # except Exception as e:
+    #     print(f"    ⚠️ Failed to delete storage: {e}")
 
     print(f"--> 🏁 Finished Sensors [{batch.get('batch_id')}]\n")
 
@@ -248,6 +270,7 @@ while True:
         pending_sensors = supabase.table('sensors')\
             .select('*')\
             .eq('status', 'pending')\
+            .neq('batch_id', 'SERVER_HEARTBEAT')\
             .limit(1)\
             .execute()
             
