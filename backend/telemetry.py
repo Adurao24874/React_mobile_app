@@ -255,20 +255,20 @@ def to_label(severity_label, is_pothole, is_hump, is_rumble, window_valid=True):
 
 def classify_dataframe(
     df: pd.DataFrame,
-    min_samples: int = 70,
+    min_samples: int = 50,
     min_speed_kph: float = 0.0,
     elev_multiplier: float = 3.0,
     fft_cv_thresh: float = 0.25,
-    minor_thresh: float = 1.8,
-    bad_thresh: float = 3.0,
+    minor_thresh: float = 2.0,
+    bad_thresh: float = 3.5,
     use_gyro: bool = False,
     gyro_scale: float = 0.1,
     peak_center_window_s: float = 2.0,
     rtp_pothole_ratio: float = 1.5,
-    hump_peak_thresh: float = 2.2,
-    hump_mag_thresh: float = 12.0,
-    min_trough_abs: float = 2.2,
-    min_peak_abs: float = 2.2,
+    hump_peak_thresh: float = 4.05,
+    hump_mag_thresh: float = 25.0,
+    min_trough_abs: float = 4.0,
+    min_peak_abs: float = 4.0,
     axis_mode: str = 'gyro',
 ):
     """Classify a dataframe of samples into per-window events.
