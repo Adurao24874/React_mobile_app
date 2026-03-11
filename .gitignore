@@ -48,3 +48,5 @@ coverage/
 build/
 .next/
 out/
+backend/temp_worker_img.jpg
+*.pt

@@ -17,8 +17,16 @@ supabase: Client = create_client(URL, KEY)
 # 2. Load the Local AI Models
 print("Loading YOLO AI Models into Memory...")
 try:
-    garbage_model = YOLO(r"C:\Users\adars\OneDrive\Desktop\roadcrack\garbage.pt")
-    pothole_model = YOLO(r"C:\Users\adars\OneDrive\Desktop\roadcrack\pothole.pt")
+    # Safely get the absolute directory path where this worker.py file is located
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    
+    # Dynamically build the OS-agnostic paths to the models
+    garbage_model_path = os.path.join(BASE_DIR, "garbage.pt")
+    pothole_model_path = os.path.join(BASE_DIR, "pothole.pt")
+    
+    garbage_model = YOLO(garbage_model_path)
+    pothole_model = YOLO(pothole_model_path)
+    
     print("✅ AI Models Loaded and Ready.")
 except Exception as e:
     print(f"❌ Critical Error loading AI Models: {e}")
@@ -80,10 +88,13 @@ def process_report(report):
         # Supabase python client storage download returns bytes
         res = supabase.storage.from_('reports').download(image_path)
         # res is a bytes array
-        with open('temp_worker_img.jpg', 'wb') as f:
+        
+        # Save temp image relative to the script directory to avoid permission issues
+        temp_img_path = os.path.join(BASE_DIR, 'temp_worker_img.jpg')
+        with open(temp_img_path, 'wb') as f:
             f.write(res)
             
-        pil_img = Image.open('temp_worker_img.jpg').convert('RGB')
+        pil_img = Image.open(temp_img_path).convert('RGB')
     except Exception as e:
         print(f"    ❌ Failed to download or read image: {e}")
         supabase.table('reports').update({"status": "failed"}).eq("id", report['id']).execute()

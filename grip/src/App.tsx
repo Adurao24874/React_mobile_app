@@ -340,14 +340,27 @@ function ReportGarbage() {
     const [savedMessage, setSavedMessage] = useState('');
 
     const takePicture = async () => {
-        try {
-            const image = await CapCamera.getPhoto({ quality: 60, width: 1280, height: 720, allowEditing: false, resultType: CameraResultType.Uri, source: CameraSource.Camera });
-            if (image.webPath) {
-                setImageUri(image.webPath);
-                fetchLocation();
-            }
-        } catch (e) { console.error("Camera error:", e); }
-    };
+    try {
+        const image = await CapCamera.getPhoto({ 
+            quality: 60, 
+            width: 1280, 
+            height: 720, 
+            allowEditing: false, 
+            // 1. Change the result type to return raw Base64 data instead of a temporary URI
+            resultType: CameraResultType.Base64, 
+            source: CameraSource.Camera 
+        });
+        
+        if (image.base64String) {
+            // 2. Format it into a standard data URL so the SyncEngine can fetch() it easily
+            const base64DataUrl = `data:image/jpeg;base64,${image.base64String}`;
+            setImageUri(base64DataUrl);
+            fetchLocation();
+        }
+    } catch (e) { 
+        console.error("Camera error:", e); 
+    }
+};
 
     const fetchLocation = async () => {
         const isWeb = Capacitor.getPlatform() === 'web';
@@ -355,7 +368,7 @@ function ReportGarbage() {
             if (!navigator.geolocation) { alert("Your browser does not support Geolocation."); return; }
             navigator.geolocation.getCurrentPosition((position) => {
                 setLoc({ lat: position.coords.latitude, lng: position.coords.longitude });
-            }, (error) => { alert(`Laptop GPS Error: ${error.message}`); setLoc(null); }, { enableHighAccuracy: false, timeout: 1, maximumAge: 0 });
+            }, (error) => { alert(`Laptop GPS Error: ${error.message}`); setLoc(null); }, { enableHighAccuracy: false, timeout: 15000, maximumAge: 0 });
         } else {
             try {
                 const coordinates = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });

@@ -23,45 +23,28 @@ export const SyncEngine = {
     },
 
     syncAll(): Promise<void> {
-        if (this.syncPromise) return this.syncPromise;
+    if (this.syncPromise) return this.syncPromise;
 
-        console.log("Starting background sync...");
-        this.syncPromise = (async () => {
-            this.isSyncing = true;
-            try {
-                // Check Server Status to avoid uploading massive payloads when backend is offline
-                const { data: statusData, error: statusErr } = await supabase
-                    .from('sensors')
-                    .select('local_file_path')
-                    .eq('id', '11111111-1111-1111-1111-111111111111')
-                    .single();
+    console.log("Starting background sync...");
+    this.syncPromise = (async () => {
+        this.isSyncing = true;
+        try {
+            // Removed the strict Server Heartbeat Check.
+            // The frontend will now instantly push data to Supabase.
+            // If the Python worker is offline, the data will simply wait safely in the 'pending' database queue!
+            
+            await this.syncIssues();
+            await this.syncSensors();
+        } catch (e) {
+            console.error("Sync run failed:", e);
+        } finally {
+            this.isSyncing = false;
+            this.syncPromise = null;
+        }
+    })();
 
-                if (statusErr || !statusData) {
-                    console.log("Server status unknown, pausing sync to prevent storage bloat.");
-                    return; // Early return prevents sync
-                }
-
-                // local_file_path acts as the timestamp ISO string in our hack
-                const lastSeen = new Date(statusData.local_file_path).getTime();
-                const now = new Date().getTime();
-
-                if (now - lastSeen > 60000) { // 60 seconds tolerance
-                    console.log("Backend offline (No heartbeat), pausing sync to prevent storage bloat.");
-                    return;
-                }
-
-                await this.syncIssues();
-                await this.syncSensors();
-            } catch (e) {
-                console.error("Sync run failed:", e);
-            } finally {
-                this.isSyncing = false;
-                this.syncPromise = null;
-            }
-        })();
-
-        return this.syncPromise;
-    },
+    return this.syncPromise;
+},
 
     async syncIssues() {
         const issues = await StorageService.getPendingIssues();
@@ -74,9 +57,25 @@ export const SyncEngine = {
                     continue;
                 }
 
-                // Fetch image Blob from local filesystem
-                const response = await fetch(issue.imageUri);
-                const blob = await response.blob();
+                // Safely extract the Blob depending on the platform (Web Base64 vs Native File URI)
+                let blob: Blob;
+
+                if (issue.imageUri.startsWith('data:')) {
+                    // LAPTOP/WEB: Manually decode the Base64 string to bypass Safari's fetch() limits
+                    const base64Data = issue.imageUri.split(',')[1];
+                    const byteCharacters = atob(base64Data);
+                    const byteNumbers = new Array(byteCharacters.length);
+                    for (let i = 0; i < byteCharacters.length; i++) {
+                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                    }
+                    const byteArray = new Uint8Array(byteNumbers);
+                    blob = new Blob([byteArray], { type: 'image/jpeg' });
+                } else {
+                    // MOBILE/NATIVE: Use standard fetch for Capacitor device file paths
+                    const response = await fetch(issue.imageUri);
+                    blob = await response.blob();
+                }
+
                 const fileName = `images/report_${issue.id}.jpg`;
 
                 // 1. Upload high-res image to Supabase Storage Bucket

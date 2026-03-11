@@ -27,6 +27,7 @@ app.add_middleware(
 URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
 KEY = "sb_publishable_DF1cQCw9e1eefh2b3y3gtA_OIUyZsem"
 supabase: Client = create_client(URL, KEY)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 3. Directories for local fallback storage
 os.makedirs("uploads/images", exist_ok=True)
@@ -35,14 +36,14 @@ os.makedirs("uploads/sensors", exist_ok=True)
 # 4. Load YOLO Models into Memory from the user's roadcrack folder
 print("Loading YOLO Models...")
 try:
-    garbage_model = YOLO(r"C:\Users\adars\OneDrive\Desktop\roadcrack\garbage.pt")
+    garbage_model = YOLO(os.path.join(BASE_DIR, "garbage.pt"))
     print("✅ Loaded Garbage YOLO Model")
 except Exception as e:
     print(f"⚠️ Failed to load Garbage Model: {e}")
     garbage_model = None
 
 try:
-    pothole_model = YOLO(r"C:\Users\adars\OneDrive\Desktop\roadcrack\pothole.pt")
+    pothole_model = YOLO(os.path.join(BASE_DIR, "pothole.pt"))
     print("✅ Loaded Pothole YOLO Model")
 except Exception as e:
     print(f"⚠️ Failed to load Pothole Model: {e}")
