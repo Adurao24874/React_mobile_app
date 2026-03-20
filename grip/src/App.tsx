@@ -6,7 +6,7 @@ import { Geolocation } from '@capacitor/geolocation';
 import { StorageService } from './services/storage';
 import { SyncEngine } from './services/sync';
 import { Network } from '@capacitor/network';
-import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle, Rectangle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase } from './lib/supabase';
@@ -454,9 +454,94 @@ function PotholeDetection() {
     const batchRef = useRef<any[]>([]);
     const geoWatchId = useRef<string | null>(null);
     const saveIntervalRef = useRef<any>(null);
+    const lastAutoUploadRef = useRef<number>(Date.now());
+
+    const setupMonitoringListeners = () => {
+        if (geoWatchId.current) return;
+
+        BackgroundGeolocation.addWatcher({
+            backgroundMessage: "Tracking road quality",
+            backgroundTitle: "GRIP Recording",
+            requestPermissions: false,
+            stale: false,
+            distanceFilter: 0
+        }, (position) => {
+            if (position) setCurrentLocation({
+                lat: position.latitude,
+                lng: position.longitude,
+                accuracy: position.accuracy
+            });
+        }).then(id => {
+            geoWatchId.current = id;
+        });
+
+        if (saveIntervalRef.current) clearInterval(saveIntervalRef.current);
+        saveIntervalRef.current = setInterval(async () => {
+            if (Capacitor.getPlatform() === 'android') {
+                const stats = await GripSensor.getReadings();
+                if (stats.readings && stats.readings.length > 0) {
+                    const latest = stats.readings[stats.readings.length - 1];
+                    setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
+                    setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
+
+                    // Accumulate readings, injecting current location into the last sample of this sub-batch
+                    // worker.py will then ffill() and bfill() to spread it across all samples.
+                    const processedReadings = [...stats.readings];
+                    if (currentLocation && processedReadings.length > 0) {
+                        const last = processedReadings[processedReadings.length - 1];
+                        last.lat = currentLocation.lat;
+                        last.lng = currentLocation.lng;
+                    }
+                    batchRef.current = [...batchRef.current, ...processedReadings];
+                    setSampleCount(batchRef.current.length);
+
+                    // Periodically backup to local storage for crash recovery
+                    if (batchRef.current.length % 50 === 0) {
+                        StorageService.saveActiveSession(batchRef.current);
+                    }
+
+                    // AUTO-UPLOAD logic: If 2 minutes have passed, pulse data to server
+                    const now = Date.now();
+                    if (now - lastAutoUploadRef.current > 120000 && batchRef.current.length > 50) {
+                        console.log("⏰ 2-minute limit reached. Auto-uploading segment...");
+                        const readingsToUpload = [...batchRef.current];
+                        
+                        // Move to permanent storage
+                        StorageService.saveSensorBatch({ readings: readingsToUpload }).then(() => {
+                            // Clear local batch so we don't upload duplicates
+                            batchRef.current = [];
+                            setSampleCount(0);
+                            lastAutoUploadRef.current = Date.now();
+                            StorageService.clearActiveSession();
+                            
+                            // Trigger sync in background
+                            SyncEngine.syncAll().catch(err => console.error("Auto-sync failed:", err));
+                        });
+                    }
+                }
+            }
+        }, 1000);
+    };
 
     useEffect(() => {
-        const checkRecovery = async () => { if (await StorageService.recoverActiveSession()) { try { await SyncEngine.syncAll(); } catch (e) { } } };
+        const checkRecovery = async () => {
+            const isActive = await StorageService.isMonitoringActive();
+            if (isActive) {
+                console.log("Resuming active monitoring session...");
+                setIsRecording(true);
+                // Pre-fill history from last auto-save
+                const readings = await StorageService.getActiveSessionReadings();
+                if (readings.length > 0) {
+                    batchRef.current = readings;
+                    setSampleCount(batchRef.current.length);
+                }
+                setupMonitoringListeners();
+            } else {
+                if (await StorageService.recoverActiveSession()) {
+                    try { await SyncEngine.syncAll(); } catch (e) { }
+                }
+            }
+        };
         checkRecovery();
     }, []);
 
@@ -486,38 +571,23 @@ function PotholeDetection() {
                 }
             }
             if (typeof (DeviceMotionEvent as any).requestPermission === 'function') await (DeviceMotionEvent as any).requestPermission();
-            const watcherId = await BackgroundGeolocation.addWatcher({ backgroundMessage: "Tracking road quality", backgroundTitle: "GRIP Recording", requestPermissions: false, stale: false, distanceFilter: 0 }, (position) => {
-                if (position) setCurrentLocation({ lat: position.latitude, lng: position.longitude, accuracy: position.accuracy });
-            });
-            geoWatchId.current = watcherId;
+            
+            await StorageService.setMonitoringStatus(true);
             batchRef.current = [];
             setSampleCount(0);
             if (Capacitor.getPlatform() === 'android') await GripSensor.startRecording();
             setIsRecording(true);
-            saveIntervalRef.current = setInterval(async () => {
-                if (Capacitor.getPlatform() === 'android') {
-                    const stats = await GripSensor.getReadings();
-                    if (stats.readings && stats.readings.length > 0) {
-                        const latest = stats.readings[stats.readings.length - 1];
-                        setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
-                        setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
-
-                        // CRITICAL: Accumulate readings so we don't lose them!
-                        batchRef.current = [...batchRef.current, ...stats.readings];
-                        setSampleCount(batchRef.current.length);
-
-                        // Periodically backup to local storage for crash recovery
-                        if (batchRef.current.length % 250 === 0) {
-                            StorageService.saveActiveSession(batchRef.current);
-                        }
-                    }
-                }
-            }, 1000);
-        } catch (e: any) { alert(`Error: ${e.message}`); setIsRecording(false); }
+            setupMonitoringListeners();
+        } catch (e: any) { 
+            alert(`Error: ${e.message}`); 
+            setIsRecording(false); 
+            await StorageService.setMonitoringStatus(false);
+        }
     };
 
     const stopMonitoring = async () => {
         setIsRecording(false);
+        await StorageService.setMonitoringStatus(false);
         if (Capacitor.getPlatform() === 'android') {
             await ForegroundService.stopForegroundService();
             await KeepAwake.allowSleep();
@@ -531,14 +601,19 @@ function PotholeDetection() {
                 setSampleCount(batchRef.current.length);
             }
         }
-        if (geoWatchId.current) await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
+        if (geoWatchId.current) {
+            await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
+            geoWatchId.current = null;
+        }
         setShowSavePrompt(true);
     };
 
     const saveSession = async () => {
-        setShowSavePrompt(false); setUploadStatus('saving');
+        setShowSavePrompt(false); 
+        setUploadStatus('saving');
         await StorageService.saveSensorBatch({ readings: batchRef.current });
         await StorageService.clearActiveSession();
+        await StorageService.setMonitoringStatus(false);
         try { await SyncEngine.syncAll(); setUploadStatus('success'); } catch (err) { setUploadStatus('failed'); }
     };
 
@@ -666,7 +741,7 @@ function MapViewer() {
     const fetchMapLayer = async () => {
         setLoading(true);
         try {
-            // Fetch Road Conditions with pagination to bypass the 1000 row limit
+            // Fetch Road Segments with pagination to bypass the 1000 row limit
             let allConditions: any[] = [];
             let from = 0;
             const PAGE_SIZE = 1000;
@@ -674,9 +749,9 @@ function MapViewer() {
 
             while (from < MAX_POINTS) {
                 const { data, error } = await supabase
-                    .from('road_conditions')
+                    .from('road_segments')
                     .select('*')
-                    .order('timestamp', { ascending: false })
+                    .order('last_updated', { ascending: false })
                     .range(from, from + PAGE_SIZE - 1);
 
                 if (error) throw error;
@@ -705,6 +780,23 @@ function MapViewer() {
         }
     };
 
+    const getSegmentColor = (seg: any) => {
+        const label = seg.label;
+        if (label === 'pothole' || label === 'BAD' || label === 'POTHOLE') return "#dc2626"; // Red
+        if (label === 'HUMP' || label === 'hump') return "#3b82f6"; // Blue
+        if (label === 'avoided_obstacle') return "#a855f7"; // Purple
+        if (label === 'RUMBLE' || label === 'rumble') return "#FF7F00"; // Orange
+        if (label === 'MINOR' || label === 'minor' || label === 'rough') return "#FBC02D"; // Yellow
+        if (label === 'GOOD' || label === 'smooth') return "#22c55e"; // Green
+
+        // Fallback to RMS logic if label is missing or unknown
+        const rms = seg.avg_rms || 0;
+        if (rms < 0.5) return "#22c55e"; 
+        if (rms < 1.5) return "#FBC02D";
+        if (rms < 3.0) return "#FF7F00";
+        return "#dc2626";
+    };
+
     useEffect(() => { fetchMapLayer(); }, []);
 
     return (
@@ -729,11 +821,14 @@ function MapViewer() {
                 <div className="flex-1 z-0 relative">
                     <MapContainer center={[15.4909, 73.8278]} zoom={11} className="w-full h-full" zoomControl={false}>
                         <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
-                        {showSensors && conditions.filter(pt => pt.latitude && pt.longitude && pt.latitude !== 0).map((pt, i) => (
-                            <CircleMarker key={`cond-${i}`} center={[pt.latitude, pt.longitude]} radius={pt.condition_label === 'POTHOLE' || pt.condition_label === 'BAD' ? 8 : 5} pathOptions={{ color: pt.color_hex, fillColor: pt.color_hex, fillOpacity: 0.8, weight: 2 }} >
-                                <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: pt.color_hex }}></div><span className="font-bold text-xs uppercase">{pt.condition_label}</span></div><p className="text-xs">Vibration: {pt.vibration_intensity?.toFixed(2)}</p></div></Popup>
-                            </CircleMarker>
-                        ))}
+                        {showSensors && conditions.filter(pt => pt.latitude && pt.longitude && pt.latitude !== 0).map((pt, i) => {
+                            const rectColor = getSegmentColor(pt); 
+                            const statusLabel = pt.label || (pt.avg_rms >= 3 ? 'BAD' : (pt.avg_rms >= 1.5 ? 'MODERATE' : 'SMOOTH'));
+                            return (
+                            <Rectangle key={`cond-${i}`} bounds={[[pt.latitude, pt.longitude], [pt.latitude + 0.00003, pt.longitude + 0.00003]]} pathOptions={{ color: rectColor, fillColor: rectColor, fillOpacity: 0.8, weight: 1 }} >
+                                <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: rectColor }}></div><span className="font-bold text-xs uppercase">{statusLabel}</span></div><p className="text-xs">Vibration (RMS): {pt.avg_rms?.toFixed(2)}</p><p className="text-xs">Conf: {pt.confidence_score?.toFixed(2)}</p><p className="text-xs">Lateral: {pt.lateral_variance?.toFixed(2)}</p></div></Popup>
+                            </Rectangle>
+                        )})}
                         {showReports && reports.filter(rep => rep.latitude && rep.longitude && rep.latitude !== 0).map((rep, i) => (
                             <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: 2 }}>
                                 <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>

@@ -172,5 +172,19 @@ export const StorageService = {
     // Clear the active session backup once the user explicitly saves or discards correctly
     async clearActiveSession() {
         await activeStore.removeItem('current_batch');
+    },
+
+    // Persist whether monitoring is active to handle app closures
+    async setMonitoringStatus(active: boolean) {
+        await activeStore.setItem('is_monitoring', active);
+    },
+
+    async isMonitoringActive(): Promise<boolean> {
+        return (await activeStore.getItem<boolean>('is_monitoring')) || false;
+    },
+
+    async getActiveSessionReadings(): Promise<any[]> {
+        const batch = await activeStore.getItem<SensorBatch>('current_batch');
+        return batch?.readings || [];
     }
 };

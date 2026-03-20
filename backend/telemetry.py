@@ -20,11 +20,11 @@ import pandas as pd
 
 # Color mapping per spec
 COLOR_MAP = {
-    'GOOD': '#2E7D32',
+    'GOOD': '#22c55e',
     'MINOR': '#FBC02D',
-    'BAD': '#FF3D00',
-    'POTHOLE': '#E31A1C',
-    'HUMP': '#FDBF6F',
+    'BAD': '#ef4444',
+    'POTHOLE': '#dc2626',
+    'HUMP': '#3b82f6',
     'RUMBLE': '#FF7F00',
     'UNKNOWN': '#9E9E9E',
 }
@@ -433,6 +433,11 @@ def classify_dataframe(
             vibration = float(np.sqrt(accel_rms**2 + (gyro_scale * gyro_rms)**2))
         else:
             vibration = compute_vibration_rms(xf, yf, zf)
+            
+        # Compute lateral variance (measure of horizontal shaking/swerving)
+        # Using variance of high-passed x and y axes.
+        lateral_variance = float(np.var(xf) + np.var(yf))
+        
         anomaly = compute_anomaly_score(vibration, rb)
         # only push valid windows into buffer
         if window_valid:
@@ -626,6 +631,7 @@ def classify_dataframe(
             'avg_speed_kph': avg_speed,
             'speed': avg_speed,
             'vibration_intensity': vibration,
+            'lateral_variance': lateral_variance,
             'anomaly_score': anomaly,
             'label': label,
             'road_grade': road_grade,
