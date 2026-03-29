@@ -19,6 +19,25 @@ URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
 KEY = "sb_publishable_DF1cQCw9e1eefh2b3y3gtA_OIUyZsem"
 supabase: Client = create_client(URL, KEY)
 
+GOA_BOUNDS = {
+    "min_lat": 14.8,
+    "max_lat": 15.9,
+    "min_lng": 73.6,
+    "max_lng": 74.35,
+}
+
+
+def is_in_goa(lat, lng):
+    try:
+        lat = float(lat)
+        lng = float(lng)
+    except (TypeError, ValueError):
+        return False
+    return (
+        GOA_BOUNDS["min_lat"] <= lat <= GOA_BOUNDS["max_lat"]
+        and GOA_BOUNDS["min_lng"] <= lng <= GOA_BOUNDS["max_lng"]
+    )
+
 # 2. Load the Local AI Models
 print("Loading YOLO AI Models into Memory...")
 try:
@@ -228,12 +247,10 @@ def process_sensors(batch):
             'lng': 'longitude'
         })
         
-        # The frontend only tags the VERY LAST sample in the array with GPS to save battery.
-        # We need to forward-fill and back-fill the GPS coordinates so every sample has a location
-        # before we pass it into the physics extraction engine.
+        # Normalize GPS fields but do not forward/back-fill stale coordinates across entire batch.
         if 'latitude' in df.columns and 'longitude' in df.columns:
-            df['latitude'] = df['latitude'].ffill().bfill()
-            df['longitude'] = df['longitude'].ffill().bfill()
+            df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+            df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
             
         # Run legacy apptesting extraction math (70 samples min = 0.7s)
         events, _ = classify_dataframe(
@@ -261,6 +278,9 @@ def process_sensors(batch):
                 lon = event.get('longitude')
                 if lat is None or lon is None or math.isnan(lat) or math.isnan(lon) or (lat == 0 and lon == 0):
                     skipped_coords += 1
+                    continue
+
+                if not is_in_goa(event['latitude'], event['longitude']):
                     continue
                     
                 cell_x = int(lat / GRID_SIZE)
