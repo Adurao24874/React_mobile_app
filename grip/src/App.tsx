@@ -6,7 +6,7 @@ import { Geolocation } from '@capacitor/geolocation';
 import { StorageService } from './services/storage';
 import { SyncEngine } from './services/sync';
 import { Network } from '@capacitor/network';
-import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle, Rectangle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase } from './lib/supabase';
@@ -477,7 +477,24 @@ function PotholeDetection() {
     const latestLocationRef = useRef<{ lat: number, lng: number, accuracy: number } | null>(null);
 
     useEffect(() => {
-        const checkRecovery = async () => { if (await StorageService.recoverActiveSession()) { try { await SyncEngine.syncAll(); } catch (e) { } } };
+        const checkRecovery = async () => {
+            const isActive = await StorageService.isMonitoringActive();
+            if (isActive) {
+                console.log("Resuming active monitoring session...");
+                setIsRecording(true);
+                // Pre-fill history from last auto-save
+                const readings = await StorageService.getActiveSessionReadings();
+                if (readings.length > 0) {
+                    batchRef.current = readings;
+                    setSampleCount(batchRef.current.length);
+                }
+                setupMonitoringListeners();
+            } else {
+                if (await StorageService.recoverActiveSession()) {
+                    try { await SyncEngine.syncAll(); } catch (e) { }
+                }
+            }
+        };
         checkRecovery();
     }, []);
 
@@ -547,6 +564,7 @@ function PotholeDetection() {
 
     const stopMonitoring = async () => {
         setIsRecording(false);
+        await StorageService.setMonitoringStatus(false);
         if (Capacitor.getPlatform() === 'android') {
             await ForegroundService.stopForegroundService();
             await KeepAwake.allowSleep();
@@ -560,14 +578,19 @@ function PotholeDetection() {
                 setSampleCount(batchRef.current.length);
             }
         }
-        if (geoWatchId.current) await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
+        if (geoWatchId.current) {
+            await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
+            geoWatchId.current = null;
+        }
         setShowSavePrompt(true);
     };
 
     const saveSession = async () => {
-        setShowSavePrompt(false); setUploadStatus('saving');
+        setShowSavePrompt(false); 
+        setUploadStatus('saving');
         await StorageService.saveSensorBatch({ readings: batchRef.current });
         await StorageService.clearActiveSession();
+        await StorageService.setMonitoringStatus(false);
         try { await SyncEngine.syncAll(); setUploadStatus('success'); } catch (err) { setUploadStatus('failed'); }
     };
 
@@ -695,7 +718,7 @@ function MapViewer() {
     const fetchMapLayer = async () => {
         setLoading(true);
         try {
-            // Fetch Road Conditions with pagination to bypass the 1000 row limit
+            // Fetch Road Segments with pagination to bypass the 1000 row limit
             let allConditions: any[] = [];
             let from = 0;
             const PAGE_SIZE = 1000;
@@ -703,7 +726,7 @@ function MapViewer() {
 
             while (from < MAX_POINTS) {
                 const { data, error } = await supabase
-                    .from('road_conditions')
+                    .from('road_segments')
                     .select('*')
                     .gte('latitude', GOA_BOUNDS.minLat)
                     .lte('latitude', GOA_BOUNDS.maxLat)
@@ -740,6 +763,23 @@ function MapViewer() {
         } finally {
             setLoading(false);
         }
+    };
+
+    const getSegmentColor = (seg: any) => {
+        const label = seg.label;
+        if (label === 'pothole' || label === 'BAD' || label === 'POTHOLE') return "#dc2626"; // Red
+        if (label === 'HUMP' || label === 'hump') return "#3b82f6"; // Blue
+        if (label === 'avoided_obstacle') return "#a855f7"; // Purple
+        if (label === 'RUMBLE' || label === 'rumble') return "#FF7F00"; // Orange
+        if (label === 'MINOR' || label === 'minor' || label === 'rough') return "#FBC02D"; // Yellow
+        if (label === 'GOOD' || label === 'smooth') return "#22c55e"; // Green
+
+        // Fallback to RMS logic if label is missing or unknown
+        const rms = seg.avg_rms || 0;
+        if (rms < 0.5) return "#22c55e"; 
+        if (rms < 1.5) return "#FBC02D";
+        if (rms < 3.0) return "#FF7F00";
+        return "#dc2626";
     };
 
     useEffect(() => { fetchMapLayer(); }, []);

@@ -4,10 +4,15 @@ import json
 import asyncio
 import math
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from PIL import Image
 from ultralytics import YOLO
+
+# Thresholds for Avoidance Detection
+LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
+COVERAGE_RATIO = 0.3      # Segment is considered 'avoided' if samples < 30% of neighbors
+MIN_SAMPLES = 50          # Minimum samples for label confidence
 
 # 1. Initialize Supabase
 URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
@@ -51,21 +56,54 @@ except Exception as e:
     print(f"❌ Critical Error loading AI Models: {e}")
     exit(1)
 
-# 3. Start Heartbeat Thread
+# 3. Start Heartbeat Thread (Updated to also handle Storage Retention)
 def heartbeat_worker():
-    print("💓 Starting Server Heartbeat...")
+    print("💓 Starting Server Heartbeat & Retention Monitor...")
+    last_cleanup = datetime.now(timezone.utc) - timedelta(hours=1)
+    
     while True:
         try:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            # We use a hardcoded UUID in the sensors table for the heartbeat to avoid DDL/Postgres requirements
+            now = datetime.now(timezone.utc)
+            # 1. Update Heartbeat
             supabase.table('sensors').upsert({
                 "id": "11111111-1111-1111-1111-111111111111",
                 "batch_id": "SERVER_HEARTBEAT",
                 "status": "online",
-                "local_file_path": now_iso
+                "local_file_path": now.isoformat()
             }).execute()
+
+            # 2. Run Retention Cleanup every hour
+            if (now - last_cleanup).total_seconds() > 3600:
+                print("🧹 Running Storage Retention Cleanup (24-hour policy)...")
+                cutoff = (now - timedelta(hours=24)).isoformat()
+                
+                # Cleanup Old Reports (Photos)
+                old_reports = supabase.table('reports').select('image_path').eq('status', 'completed').lt('created_at', cutoff).execute()
+                for r in old_reports.data:
+                    path = r.get('image_path')
+                    if path:
+                        try:
+                            supabase.storage.from_('reports').remove([path])
+                            # Clear path in DB so we don't try to delete again next hour
+                            supabase.table('reports').update({"image_path": None}).eq('image_path', path).execute()
+                        except: pass
+                
+                # Cleanup Old Sensors (JSON Telemetry)
+                old_sensors = supabase.table('sensors').select('local_file_path').eq('status', 'completed').lt('created_at', cutoff).execute()
+                for s in old_sensors.data:
+                    path = s.get('local_file_path')
+                    if path and path != 'SERVER_HEARTBEAT':
+                        try:
+                            supabase.storage.from_('reports').remove([path])
+                            supabase.table('sensors').update({"local_file_path": "CLEANED"}).eq('local_file_path', path).execute()
+                        except: pass
+                
+                last_cleanup = now
+                print("✨ Retention Cleanup Complete.")
+
         except Exception as e:
-            pass # Keep it quiet
+            print(f"⚠️ Heartbeat/Retention Warning: {e}")
+        
         time.sleep(10)
 
 threading.Thread(target=heartbeat_worker, daemon=True).start()
@@ -157,17 +195,18 @@ def process_report(report):
         print(f"    ❌ Database update failed: {e}")
         return
 
-    # 4. Clean up Storage to preserve the 1GB Free Tier
-    print("    ⏳ Retaining massive Storage payload (24-hour retention policy)...")
-    # try:
-    #     supabase.storage.from_('reports').remove([image_path])
-    #     print("    ✨ Storage clean.")
-    # except Exception as e:
-    #     print(f"    ⚠️ Failed to delete storage: {e}")
-
-        
+    # Results are updated in the DB, and the file is kept in Storage for 24h by the retention monitor
     print(f"--> 🏁 Finished Report [{report['id']}]\n")
 
+LABEL_PRIORITY = {
+    'POTHOLE': 6,
+    'HUMP': 5,
+    'RUMBLE': 4,
+    'BAD': 3,
+    'MINOR': 2,
+    'GOOD': 1,
+    'UNKNOWN': 0
+}
 
 def process_sensors(batch):
     print(f"\n--> 📥 Picking up Pending Sensor Batch [{batch.get('batch_id')}]")
@@ -223,35 +262,165 @@ def process_sensors(batch):
         
         print(f"    🗺️ Extracted {len(events)} physical street map points.")
         
-        # 3. Push coordinates to Map Visualization Database
+        # 3. Push coordinates to Map Visualization Database as Segments
         if len(events) > 0:
-            print("    📤 Uploading coordinate clusters to Supabase Map Layer...")
-            success_count = 0
+            print(f"    📤 Aggregating {len(events)} events into segments...")
+            from collections import defaultdict
+            import numpy as np
+            
+            # Group events into 3-meter bins
+            segment_groups = defaultdict(list)
+            GRID_SIZE = 0.00003
+            
+            skipped_coords = 0
             for event in events:
-                if math.isnan(event['latitude']) or math.isnan(event['longitude']) or (event['latitude'] == 0 and event['longitude'] == 0):
+                lat = event.get('latitude')
+                lon = event.get('longitude')
+                if lat is None or lon is None or math.isnan(lat) or math.isnan(lon) or (lat == 0 and lon == 0):
+                    skipped_coords += 1
                     continue
 
                 if not is_in_goa(event['latitude'], event['longitude']):
                     continue
                     
-                try:
-                    # Convert the frontend's unix milliseconds into an integer for the BIGINT column
-                    ts_ms = int(event['timestamp'])
-
-                    supabase.table('road_conditions').insert({
-                        'batch_id': batch['batch_id'],
-                        'latitude': event['latitude'],
-                        'longitude': event['longitude'],
-                        'vibration_intensity': event['vibration_intensity'],
-                        'condition_label': event['label'], # GOOD, POTHOLE, MINOR, BAD, HUMP, RUMBLE
-                        'color_hex': event['color_hex'],
-                        'timestamp': ts_ms
-                    }).execute()
-                    success_count += 1
-                except Exception as insert_err:
-                    print(f"        ⚠️ Failed to insert coordinate point: {insert_err}")
+                cell_x = int(lat / GRID_SIZE)
+                cell_y = int(lon / GRID_SIZE)
+                segment_id = f"{cell_x}_{cell_y}"
+                
+                segment_groups[segment_id].append(event)
             
-            print(f"    ✅ Successfully inserted {success_count} points into road_conditions")
+            if skipped_coords > 0:
+                print(f"    ⚠️ Skipped {skipped_coords} events due to missing/zero GPS coordinates")
+                
+            if not segment_groups:
+                print("    ⚠️ No valid segments found to upload (all events lacked coordinates).")
+            else:
+                print(f"    📦 Grouped into {len(segment_groups)} unique segments.")
+                seg_ids = list(segment_groups.keys())
+                existing_map = {}
+                try:
+                    # Fetch existing segments to do running averages
+                    res = supabase.table('road_segments').select('*').in_('segment_id', seg_ids).execute()
+                    if res.data:
+                        for row in res.data:
+                            existing_map[row['segment_id']] = row
+                except Exception as e:
+                    print(f"        ⚠️ Failed to fetch existing segments: {e}")
+                
+                segments_to_upsert = []
+                now_iso = datetime.now(timezone.utc).isoformat()
+                
+                for seg_id, items in segment_groups.items():
+                    # STEP 1: COMPUTE BATCH STATS
+                    batch_rms = float(np.mean([i['vibration_intensity'] for i in items if 'vibration_intensity' in i]))
+                    batch_accel = float(np.mean([i.get('accel_z', 0.0) for i in items])) # avg_vertical_accel
+                    batch_count = sum([i.get('samples', 50) for i in items])
+                    batch_lateral_var = float(np.mean([i.get('lateral_variance', 0.0) for i in items]))
+                    
+                    # Pick the highest priority label seen in the batch as a starting point
+                    batch_label = 'GOOD'
+                    max_prio = 0
+                    for i in items:
+                        prio = LABEL_PRIORITY.get(i.get('label', 'GOOD'), 0)
+                        if prio > max_prio:
+                            max_prio = prio
+                            batch_label = i.get('label', 'GOOD')
+                    
+                    # STEP 2: WEIGHTED UPDATE
+                    if seg_id in existing_map:
+                        existing = existing_map[seg_id]
+                        old_rms = existing.get('avg_rms') or 0.0
+                        old_accel = existing.get('avg_accel') or 0.0
+                        old_count = existing.get('sample_count') or 0
+                        old_lateral = existing.get('lateral_variance') or 0.0
+                        old_label = existing.get('label') or 'smooth'
+                        
+                        total_count = old_count + batch_count
+                        new_rms = ((old_rms * old_count) + (batch_rms * batch_count)) / total_count
+                        new_accel = ((old_accel * old_count) + (batch_accel * batch_count)) / total_count
+                        new_lateral = ((old_lateral * old_count) + (batch_lateral * batch_count)) / total_count
+                        
+                        segments_to_upsert.append({
+                            "segment_id": seg_id,
+                            "latitude": existing.get('latitude', items[0]['latitude']),
+                            "longitude": existing.get('longitude', items[0]['longitude']),
+                            "avg_rms": float(new_rms),
+                            "avg_accel": float(new_accel),
+                            "lateral_variance": float(new_lateral),
+                            "sample_count": total_count,
+                            "last_updated": now_iso
+                        })
+                    else:
+                        segments_to_upsert.append({
+                            "segment_id": seg_id,
+                            "latitude": items[0]['latitude'],
+                            "longitude": items[0]['longitude'],
+                            "avg_rms": batch_rms,
+                            "avg_accel": batch_accel,
+                            "lateral_variance": batch_lateral_var,
+                            "sample_count": batch_count,
+                            "last_updated": now_iso
+                        })
+                        
+                try:
+                    # Initial Upsert to update basic stats
+                    supabase.table('road_segments').upsert(segments_to_upsert).execute()
+                    print(f"    ✅ Updated stats for {len(segments_to_upsert)} segments.")
+                    
+                    # STEP 3-8: SPATIAL AVOIDANCE ANALYSIS
+                    print("    🔍 Performing Spatial Avoidance Analysis...")
+                    all_updated_ids = [s['segment_id'] for s in segments_to_upsert]
+                    
+                    for seg in segments_to_upsert:
+                        seg_id = seg['segment_id']
+                        try:
+                            parts = seg_id.split('_')
+                            x, y = int(parts[0]), int(parts[1])
+                        except: continue
+                        
+                        # Define neighbors
+                        neighbor_ids = [f"{x+1}_{y}", f"{x-1}_{y}", f"{x}_{y+1}", f"{x}_{y-1}", f"{x+1}_{y+1}", f"{x-1}_{y-1}"]
+                        
+                        # STEP 3: FETCH NEIGHBORS
+                        n_res = supabase.table('road_segments').select('*').in_('segment_id', neighbor_ids).execute()
+                        neighbors = n_res.data if n_res.data else []
+                        
+                        if not neighbors: continue
+                        
+                        # Compute neighbor stats
+                        n_avg_count = np.mean([n['sample_count'] for n in neighbors])
+                        n_lat_avg = np.mean([n['lateral_variance'] for n in neighbors])
+                        
+                        self_count = seg['sample_count']
+                        is_low_coverage = self_count < (COVERAGE_RATIO * n_avg_count)
+                        confirmed_avoidance = n_lat_avg > LATERAL_THRESHOLD
+                        
+                        # STEP 6: SCORES
+                        bump_score = seg['avg_rms']
+                        avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) # Weighted
+                        
+                        # STEP 7: CLASSIFY
+                        final_label = "smooth"
+                        if bump_score > 3.0: final_label = "pothole"
+                        elif is_low_coverage and confirmed_avoidance: final_label = "avoided_obstacle"
+                        elif bump_score > 1.5: final_label = "rough"
+                        
+                        # STEP 8: STORE RESULT
+                        conf = min(1.0, self_count / 200.0) # Simple confidence
+                        supabase.table('road_segments').update({
+                            "label": final_label,
+                            "confidence_score": float(conf)
+                        }).eq("segment_id", seg_id).execute()
+                        
+                    print("    ✨ Avoidance labels prioritized and updated.")
+                    
+                except Exception as insert_err:
+                    print(f"        ⚠️ Spatial Analysis error: {insert_err}")
+                    
+        # STEP 9: CLEANUP
+        print(f"    🧹 Cleaning up processed batch [{batch['id']}]...")
+        supabase.table('sensors').delete().eq("id", batch['id']).execute()
+        print("    ✅ Batch deleted.")
         
     except Exception as e:
         print(f"    ❌ Telemetry Physics failed: {e}")
@@ -267,14 +436,6 @@ def process_sensors(batch):
     except Exception as e:
         print(f"    ❌ Database update failed: {e}")
         return
-
-    # 3. Clean up Storage limits
-    print("    ⏳ Retaining JSON telemetry in Storage (24-hour retention policy)...")
-    # try:
-    #     supabase.storage.from_('reports').remove([file_path])
-    #     print("    ✨ Storage clean.")
-    # except Exception as e:
-    #     print(f"    ⚠️ Failed to delete storage: {e}")
 
     print(f"--> 🏁 Finished Sensors [{batch.get('batch_id')}]\n")
 

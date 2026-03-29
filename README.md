@@ -18,18 +18,21 @@ This repository contains the source code for the GRIP project, which includes a 
 
 The GRIP system uses a hybrid processing model where data is collected on the edge and processed in the cloud:
 
-### 1. Passive Sensor Telemetry (Pothole Detection)
-*   **Collection**: The mobile app (`grip/src/App.tsx`) records accelerometer and gyroscope data at **50Hz**. Every sample is tagged with live GPS coordinates using a `useRef` location buffer to prevent dropouts.
-*   **Transport**: Data is batched into JSON files and uploaded to **Supabase Storage** (`reports` bucket).
-*   **Processing**: The `backend/worker.py` script polls for new batches and executes the `process_sensors` workflow.
-*   **Physics Engine**: The logic resides in `backend/telemetry.py`, using High-Pass filters and vertical projection to isolate "road shocks" (z-axis vibrations) independent of phone orientation.
-*   **Classification**: The `classify_dataframe` function identifies features like **Humps, Potholes, and Rumble Strips** based on vibration intensity and signature patterns.
-*   **Storage**: Extracted coordinate clusters are saved to the `road_conditions` table for map visualization.
+### 1. Passive Sensor Telemetry (Segment-Based Mapping)
+*   **Collection**: The mobile app (`grip/src/App.tsx`) records accelerometer and gyroscope data at **50Hz**. 
+*   **Auto-Upload**: Data now syncs to the server every **2 minutes** (120s pulse) while recording, ensuring zero data loss and low memory overhead on long trips.
+*   **Spatial Binning**: Instead of raw points, the system quantizes the map into **3-meter grid segments** (`road_segments`). 
+*   **Physics Engine**: The `backend/telemetry.py` extracts **Vertical RMS** (roughness) and **Lateral Variance** (swerving/shaking) for each segment.
+*   **Advanced Avoidance Detection**: Using Step-by-Step Spatial Intelligence:
+    *   **Coverage Analysis**: Detects "holes" in the map where riders consistently avoid a segment.
+    *   **Neighbor Profiling**: Fetches the 6 nearest neighbors to confirm if swerving (lateral variance) occurred around the skip-zone.
+    *   **Labeling**: Automatically classifies segments as `smooth`, `rough`, `pothole`, or `avoided_obstacle` (Purple Zones).
+*   **Weighted Averaging**: Road quality is updated using a running weighted average across multiple users, ensuring the map becomes more accurate over time.
 
 ### 2. Active Image Reports (Debris Detection)
 *   **Collection**: Users capture images of road issues (garbage, deep potholes) via the **Camera API**.
 *   **Transport**: Images are uploaded to the `reports` bucket in **Supabase Storage**.
-*   **Processing**: `backend/worker.py` detects pending reports and runs local **YOLO AI models** (`garbage.pt.pt`, `pothole.pt`).
+*   **Processing**: `backend/worker.py` detects pending reports and runs local **YOLO AI models** (`garbage.pt`, `pothole.pt`).
 *   **Classification**: High-confidence detections are labeled (e.g., "Plastic Waste", "Deep Pothole") and stored in the `reports` table.
 
 ## Tasks Performed During Initialization
