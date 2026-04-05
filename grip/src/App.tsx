@@ -1,12 +1,12 @@
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, Navigate } from 'react-router-dom';
-import { Camera, MapPin, Activity, History, ArrowRight, ArrowLeft, CheckCircle2, Layers, RefreshCw } from 'lucide-react';
+import { Camera, MapPin, Activity, History, ArrowRight, ArrowLeft, CheckCircle2, Layers, RefreshCw, LogOut } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Geolocation } from '@capacitor/geolocation';
 import { StorageService } from './services/storage';
 import { SyncEngine } from './services/sync';
 import { Network } from '@capacitor/network';
-import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, Circle, Rectangle } from 'react-leaflet';
+import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, useMapEvents, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { supabase } from './lib/supabase';
@@ -88,6 +88,7 @@ function Login() {
     const navigate = useNavigate();
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
+    const [name, setName] = useState('');
     const [isSignUp, setIsSignUp] = useState(false);
     const [loading, setLoading] = useState(false);
     const [errorMsg, setErrorMsg] = useState('');
@@ -101,6 +102,7 @@ function Login() {
             if (isSignUp) {
                 const { error } = await supabase.auth.signUp({ email, password });
                 if (error) throw error;
+                if (name.trim()) localStorage.setItem('local_user_name', name.trim());
                 alert('Account created! Depending on server settings you may need to check your email to confirm, otherwise you can now Log in.');
                 setIsSignUp(false);
             } else {
@@ -135,6 +137,19 @@ function Login() {
                 )}
 
                 <form onSubmit={handleAuth} className="space-y-4">
+                    {isSignUp && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Name</label>
+                            <input
+                                type="text"
+                                value={name}
+                                onChange={e => setName(e.target.value)}
+                                placeholder="Your Name"
+                                className="w-full px-4 py-3 rounded-xl bg-gray-100 dark:bg-zinc-700 border border-transparent focus:border-blue-500 focus:bg-white dark:focus:bg-zinc-600 outline-none transition-all dark:text-white font-medium"
+                                required={isSignUp}
+                            />
+                        </div>
+                    )}
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
                         <input
@@ -238,9 +253,13 @@ function Dashboard() {
     const [isOnline, setIsOnline] = useState(true);
     const [pendingSyncs, setPendingSyncs] = useState(0);
     const [showGuidance, setShowGuidance] = useState(false);
+    const [userName, setUserName] = useState('Citizen');
 
     useEffect(() => {
         SyncEngine.start();
+        const storedName = localStorage.getItem('local_user_name');
+        if (storedName) setUserName(storedName);
+
         const updateStatus = async () => {
             const status = await Network.getStatus();
             setIsOnline(status.connected);
@@ -274,6 +293,11 @@ function Dashboard() {
         }
     };
 
+    const handleSignOut = async () => {
+        await supabase.auth.signOut();
+        navigate('/login');
+    };
+
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 pb-20">
             {showGuidance && <WelcomeGuidance onComplete={completeGuidance} />}
@@ -288,8 +312,8 @@ function Dashboard() {
                             <p className="text-white/80 font-medium">Citizen</p>
                         </div>
                     </div>
-                    <button className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition-colors">
-                        <ArrowRight className="w-6 h-6" />
+                    <button onClick={handleSignOut} title="Sign Out" className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition-colors">
+                        <LogOut className="w-5 h-5 text-white" />
                     </button>
                 </div>
                 <div className={`p-3 rounded-2xl flex items-center justify-between backdrop-blur-md shadow-inner ${isOnline && pendingSyncs === 0 ? 'bg-white/10 text-white' : (isOnline && pendingSyncs > 0 ? 'bg-yellow-500/20 text-yellow-50' : 'bg-red-500/20 text-red-50')}`}>
@@ -302,7 +326,9 @@ function Dashboard() {
             </div>
             <div className="px-6 space-y-6">
                 <div>
-                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Welcome Back!</h2>
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
+                        Welcome Back{userName !== 'Citizen' ? `, ${userName}` : ''}!
+                    </h2>
                     <p className="text-gray-500 dark:text-gray-400 mt-1">Report infrastructure issues in your area</p>
                 </div>
                 <div className="space-y-4">
@@ -395,6 +421,12 @@ function ReportGarbage() {
 
     const handleSave = async () => {
         if (!imageUri || !loc) return;
+        
+        if (!isInGoa(loc.lat, loc.lng)) {
+            alert("This platform only accepts reports within Goa. Please do not submit data from outside the region.");
+            return;
+        }
+        
         setIsSaving(true);
         try {
             await StorageService.saveIssue({ imageUri, lat: loc.lat, lng: loc.lng, timestamp: Date.now(), type: 'auto' });
@@ -424,7 +456,14 @@ function ReportGarbage() {
                     {!imageUri ? (
                         <button onClick={takePicture} className="w-full py-4 bg-gradient-to-r from-green-500 to-blue-600 text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.98] transition-all"><Camera className="w-5 h-5" />Capture Image</button>
                     ) : (
-                        <button onClick={handleSave} disabled={isSaving || !loc} className="w-full py-4 bg-blue-600 disabled:bg-blue-400 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:bg-blue-700 active:scale-[0.98] transition-all">{isSaving ? "Saving Offline..." : "Save Report"}</button>
+                        <div className="space-y-4">
+                            {loc && !isInGoa(loc.lat, loc.lng) && (
+                                <div className="p-3 bg-red-100/10 border border-red-500/20 text-red-500 rounded-xl text-sm font-medium flex items-center gap-2">
+                                    <span className="text-lg">⚠️</span> Location is outside Goa. Reports are only accepted within Goa bounds.
+                                </div>
+                            )}
+                            <button onClick={handleSave} disabled={isSaving || !loc || (loc && !isInGoa(loc.lat, loc.lng))} className="w-full py-4 bg-blue-600 disabled:bg-blue-400 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg flex items-center justify-center gap-2 hover:bg-blue-700 active:scale-[0.98] transition-all">{isSaving ? "Saving Offline..." : "Save Report"}</button>
+                        </div>
                     )}
                 </div>
                 <div className="bg-white dark:bg-zinc-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center justify-between">
@@ -462,6 +501,41 @@ function MapBoundsUpdater({ points }: { points: any[] }) {
     return null;
 }
 
+function DynamicMapLayers({ conditions, reports, showSensors, showReports, getConditionColor }: any) {
+    const map = useMap();
+    const [zoom, setZoom] = useState(map.getZoom());
+
+    useMapEvents({
+        zoomend: () => setZoom(map.getZoom()),
+    });
+
+    const getRadius = (isBad: boolean) => {
+        if (zoom <= 11) return isBad ? 3 : 1;
+        if (zoom <= 13) return isBad ? 5 : 2;
+        if (zoom <= 15) return isBad ? 6 : 3;
+        return isBad ? 8 : 5;
+    };
+
+    return (
+        <>
+            {showSensors && conditions.filter((pt: any) => isInGoa(Number(pt.latitude), Number(pt.longitude))).map((pt: any, i: number) => {
+                const ptColor = getConditionColor(pt.condition_label);
+                const isBad = pt.condition_label === 'POTHOLE' || pt.condition_label === 'BAD';
+                return (
+                    <CircleMarker key={`cond-${i}`} center={[pt.latitude, pt.longitude]} radius={getRadius(isBad)} pathOptions={{ color: ptColor, fillColor: ptColor, fillOpacity: zoom < 12 ? 0.9 : 0.8, weight: zoom < 12 ? 0 : 2 }} >
+                        <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: ptColor }}></div><span className="font-bold text-xs uppercase">{pt.condition_label}</span></div><p className="text-xs">Vibration: {pt.avg_rms?.toFixed(2)}</p></div></Popup>
+                    </CircleMarker>
+                );
+            })}
+            {showReports && reports.filter((rep: any) => isInGoa(Number(rep.latitude), Number(rep.longitude))).map((rep: any, i: number) => (
+                <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={zoom <= 12 ? 5 : 9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: zoom < 12 ? 1 : 2 }}>
+                    <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
+                </CircleMarker>
+            ))}
+        </>
+    );
+}
+
 function PotholeDetection() {
     const navigate = useNavigate();
     const [isRecording, setIsRecording] = useState(false);
@@ -475,6 +549,58 @@ function PotholeDetection() {
     const geoWatchId = useRef<string | null>(null);
     const saveIntervalRef = useRef<any>(null);
     const latestLocationRef = useRef<{ lat: number, lng: number, accuracy: number } | null>(null);
+    const sessionRef = useRef<string | null>(null);
+    const totalSamplesRef = useRef<number>(0);
+
+    const setupMonitoringListeners = async () => {
+        if (typeof (DeviceMotionEvent as any).requestPermission === 'function') await (DeviceMotionEvent as any).requestPermission();
+        const watcherId = await BackgroundGeolocation.addWatcher({ backgroundMessage: "Tracking road quality", backgroundTitle: "GRIP Recording", requestPermissions: false, stale: false, distanceFilter: 0 }, (position) => {
+            if (position) {
+                const loc = { lat: position.latitude, lng: position.longitude, accuracy: position.accuracy };
+                latestLocationRef.current = loc;
+                setCurrentLocation(loc);
+            }
+        });
+        geoWatchId.current = watcherId;
+
+        if (saveIntervalRef.current) clearInterval(saveIntervalRef.current);
+        saveIntervalRef.current = setInterval(async () => {
+            if (Capacitor.getPlatform() === 'android') {
+                const latestLoc = latestLocationRef.current;
+                if (latestLoc && !isInGoa(latestLoc.lat, latestLoc.lng)) {
+                    alert("You have left the permitted recording region (Goa). Data collection has been stopped automatically.");
+                    stopMonitoring();
+                    return;
+                }
+
+                const stats = await GripSensor.getReadings();
+                if (stats.readings && stats.readings.length > 0) {
+                    const latest = stats.readings[stats.readings.length - 1];
+                    setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
+                    setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
+
+                    const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
+                    const normalizedReadings = stats.readings.map((r: any) => canTagGps ? { ...r, lat: latestLoc.lat, lng: latestLoc.lng, session_id: sessionRef.current } : { ...r, session_id: sessionRef.current });
+
+                    // CRITICAL: Accumulate readings so we don't lose them!
+                    batchRef.current = [...batchRef.current, ...normalizedReadings];
+                    totalSamplesRef.current += normalizedReadings.length;
+                    setSampleCount(totalSamplesRef.current);
+
+                    // Periodically chunk and send in background every 500 samples
+                    if (batchRef.current.length >= 500) {
+                        const chunkToSave = batchRef.current.splice(0, 500);
+                        StorageService.saveSensorBatch({ readings: chunkToSave }).then(() => {
+                            SyncEngine.syncAll();
+                        }).catch(e => console.error("Continuous sync failed:", e));
+                    } else if (batchRef.current.length % 250 === 0 && batchRef.current.length > 0) {
+                        // Periodically backup to local storage for crash recovery
+                        StorageService.saveActiveSession(batchRef.current);
+                    }
+                }
+            }
+        }, 1000);
+    };
 
     useEffect(() => {
         const checkRecovery = async () => {
@@ -486,7 +612,9 @@ function PotholeDetection() {
                 const readings = await StorageService.getActiveSessionReadings();
                 if (readings.length > 0) {
                     batchRef.current = readings;
-                    setSampleCount(batchRef.current.length);
+                    sessionRef.current = readings[0].session_id || ('session_rec_' + Date.now().toString());
+                    totalSamplesRef.current = batchRef.current.length;
+                    setSampleCount(totalSamplesRef.current);
                 }
                 setupMonitoringListeners();
             } else {
@@ -523,42 +651,13 @@ function PotholeDetection() {
                     }
                 }
             }
-            if (typeof (DeviceMotionEvent as any).requestPermission === 'function') await (DeviceMotionEvent as any).requestPermission();
-            const watcherId = await BackgroundGeolocation.addWatcher({ backgroundMessage: "Tracking road quality", backgroundTitle: "GRIP Recording", requestPermissions: false, stale: false, distanceFilter: 0 }, (position) => {
-                if (position) {
-                    const loc = { lat: position.latitude, lng: position.longitude, accuracy: position.accuracy };
-                    latestLocationRef.current = loc;
-                    setCurrentLocation(loc);
-                }
-            });
-            geoWatchId.current = watcherId;
             batchRef.current = [];
+            totalSamplesRef.current = 0;
+            sessionRef.current = 'session_' + Date.now().toString();
             setSampleCount(0);
             if (Capacitor.getPlatform() === 'android') await GripSensor.startRecording();
             setIsRecording(true);
-            saveIntervalRef.current = setInterval(async () => {
-                if (Capacitor.getPlatform() === 'android') {
-                    const stats = await GripSensor.getReadings();
-                    if (stats.readings && stats.readings.length > 0) {
-                        const latest = stats.readings[stats.readings.length - 1];
-                        setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
-                        setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
-
-                        const latestLoc = latestLocationRef.current;
-                        const canTagGps = !!latestLoc && latestLoc.accuracy <= 60 && isInGoa(latestLoc.lat, latestLoc.lng);
-                        const normalizedReadings = stats.readings.map((r: any) => canTagGps ? { ...r, lat: latestLoc!.lat, lng: latestLoc!.lng } : r);
-
-                        // CRITICAL: Accumulate readings so we don't lose them!
-                        batchRef.current = [...batchRef.current, ...normalizedReadings];
-                        setSampleCount(batchRef.current.length);
-
-                        // Periodically backup to local storage for crash recovery
-                        if (batchRef.current.length % 250 === 0) {
-                            StorageService.saveActiveSession(batchRef.current);
-                        }
-                    }
-                }
-            }, 1000);
+            await setupMonitoringListeners();
         } catch (e: any) { alert(`Error: ${e.message}`); setIsRecording(false); }
     };
 
@@ -574,8 +673,13 @@ function PotholeDetection() {
             const result = await GripSensor.getReadings();
             await GripSensor.stopRecording();
             if (result.readings) {
-                batchRef.current = [...batchRef.current, ...result.readings];
-                setSampleCount(batchRef.current.length);
+                const latestLoc = latestLocationRef.current;
+                const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
+                const normalizedReadings = result.readings.map((r: any) => canTagGps ? { ...r, lat: latestLoc.lat, lng: latestLoc.lng, session_id: sessionRef.current } : { ...r, session_id: sessionRef.current });
+                
+                batchRef.current = [...batchRef.current, ...normalizedReadings];
+                totalSamplesRef.current += normalizedReadings.length;
+                setSampleCount(totalSamplesRef.current);
             }
         }
         if (geoWatchId.current) {
@@ -588,7 +692,10 @@ function PotholeDetection() {
     const saveSession = async () => {
         setShowSavePrompt(false); 
         setUploadStatus('saving');
-        await StorageService.saveSensorBatch({ readings: batchRef.current });
+        if (batchRef.current.length > 0) {
+            await StorageService.saveSensorBatch({ readings: batchRef.current });
+            batchRef.current = [];
+        }
         await StorageService.clearActiveSession();
         await StorageService.setMonitoringStatus(false);
         try { await SyncEngine.syncAll(); setUploadStatus('success'); } catch (err) { setUploadStatus('failed'); }
@@ -732,7 +839,7 @@ function MapViewer() {
                     .lte('latitude', GOA_BOUNDS.maxLat)
                     .gte('longitude', GOA_BOUNDS.minLng)
                     .lte('longitude', GOA_BOUNDS.maxLng)
-                    .order('timestamp', { ascending: false })
+                    .order('last_updated', { ascending: false })
                     .range(from, from + PAGE_SIZE - 1);
 
                 if (error) throw error;
@@ -765,24 +872,18 @@ function MapViewer() {
         }
     };
 
-    const getSegmentColor = (seg: any) => {
-        const label = seg.label;
-        if (label === 'pothole' || label === 'BAD' || label === 'POTHOLE') return "#dc2626"; // Red
-        if (label === 'HUMP' || label === 'hump') return "#3b82f6"; // Blue
-        if (label === 'avoided_obstacle') return "#a855f7"; // Purple
-        if (label === 'RUMBLE' || label === 'rumble') return "#FF7F00"; // Orange
-        if (label === 'MINOR' || label === 'minor' || label === 'rough') return "#FBC02D"; // Yellow
-        if (label === 'GOOD' || label === 'smooth') return "#22c55e"; // Green
-
-        // Fallback to RMS logic if label is missing or unknown
-        const rms = seg.avg_rms || 0;
-        if (rms < 0.5) return "#22c55e"; 
-        if (rms < 1.5) return "#FBC02D";
-        if (rms < 3.0) return "#FF7F00";
-        return "#dc2626";
-    };
-
     useEffect(() => { fetchMapLayer(); }, []);
+
+    const getConditionColor = (label: string) => {
+        switch (label) {
+            case 'POTHOLE': return '#dc2626';
+            case 'BAD': return '#ef4444';
+            case 'HUMP': return '#3b82f6';
+            case 'RUMBLE': return '#eab308';
+            case 'MINOR': return '#f59e0b';
+            case 'GOOD': default: return '#22c55e';
+        }
+    };
 
     return (
         <div className="h-screen flex flex-col bg-zinc-900 relative">
@@ -806,16 +907,13 @@ function MapViewer() {
                 <div className="flex-1 z-0 relative">
                     <MapContainer center={[15.4909, 73.8278]} zoom={11} className="w-full h-full" zoomControl={false}>
                         <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
-                        {showSensors && conditions.filter(pt => isInGoa(Number(pt.latitude), Number(pt.longitude))).map((pt, i) => (
-                            <CircleMarker key={`cond-${i}`} center={[pt.latitude, pt.longitude]} radius={pt.condition_label === 'POTHOLE' || pt.condition_label === 'BAD' ? 8 : 5} pathOptions={{ color: pt.color_hex, fillColor: pt.color_hex, fillOpacity: 0.8, weight: 2 }} >
-                                <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: pt.color_hex }}></div><span className="font-bold text-xs uppercase">{pt.condition_label}</span></div><p className="text-xs">Vibration: {pt.vibration_intensity?.toFixed(2)}</p></div></Popup>
-                            </CircleMarker>
-                        ))}
-                        {showReports && reports.filter(rep => isInGoa(Number(rep.latitude), Number(rep.longitude))).map((rep, i) => (
-                            <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: 2 }}>
-                                <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
-                            </CircleMarker>
-                        ))}
+                        <DynamicMapLayers 
+                            conditions={conditions} 
+                            reports={reports} 
+                            showSensors={showSensors} 
+                            showReports={showReports} 
+                            getConditionColor={getConditionColor} 
+                        />
                         <LocateControl />
                         <MapBoundsUpdater points={conditions.length > 0 ? conditions : reports} />
                     </MapContainer>
