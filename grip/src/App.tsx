@@ -19,12 +19,14 @@ import type { BackgroundGeolocationPlugin } from '@capacitor-community/backgroun
 
 const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
 
+const CURRENT_APP_VERSION = "v1.1.0";
+
 interface GripSensorPlugin {
     startRecording(): Promise<{ status: string }>;
     stopRecording(): Promise<{ status: string }>;
     getReadings(): Promise<{ readings: any[] }>;
-    checkPermissions(): Promise<{ sensors: string; activity: string }>;
-    requestPermissions(): Promise<{ sensors: string; activity: string }>;
+    checkPermissions(): Promise<{ sensors: string; activity: string; storage: string }>;
+    requestPermissions(): Promise<{ sensors: string; activity: string; storage: string }>;
     getPromptStates(): Promise<{ permissionPrompted: boolean; batteryPrompted: boolean }>;
     markPermissionPrompted(): Promise<void>;
     markBatteryPrompted(): Promise<void>;
@@ -269,10 +271,15 @@ function Dashboard() {
         };
         updateStatus();
         if (Capacitor.getPlatform() === 'android') {
+            // Auto-resume to active recording page if session is monitoring
+            StorageService.isMonitoringActive().then(active => {
+                if (active) navigate('/report/pothole');
+            });
+
             GripSensor.getPromptStates().then(async states => {
                 if (!states.permissionPrompted) {
                     const status = await GripSensor.checkPermissions();
-                    if (status.sensors !== 'granted' || status.activity !== 'granted') {
+                    if (status.sensors !== 'granted' || status.activity !== 'granted' || status.storage !== 'granted') {
                         await GripSensor.requestPermissions();
                     }
                     await GripSensor.markPermissionPrompted();
@@ -321,7 +328,7 @@ function Dashboard() {
                         <div className={`w-3 h-3 rounded-full ${isOnline ? 'bg-green-400' : 'bg-red-400'}`}></div>
                         <span className="text-sm font-semibold">{isOnline ? 'System Online' : 'Offline Mode'}</span>
                     </div>
-                    {pendingSyncs > 0 && <div className="text-xs font-bold bg-white/20 px-2 py-1 rounded-lg">{pendingSyncs} pending sync</div>}
+                    {pendingSyncs > 0 && <div className="text-xs font-bold bg-white/20 px-2 py-1 rounded-lg">{pendingSyncs} local upload pending</div>}
                 </div>
             </div>
             <div className="px-6 space-y-6">
@@ -580,20 +587,28 @@ function PotholeDetection() {
                     setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
 
                     const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
-                    const normalizedReadings = stats.readings.map((r: any) => canTagGps ? { ...r, lat: latestLoc.lat, lng: latestLoc.lng, session_id: sessionRef.current } : { ...r, session_id: sessionRef.current });
+                    const normalizedReadings = stats.readings.map((r: any) => {
+                        const hasNativeGps = r.lat !== 0 && r.lat !== undefined;
+                        return { 
+                            ...r, 
+                            lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat), 
+                            lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng), 
+                            session_id: sessionRef.current 
+                        };
+                    });
 
                     // CRITICAL: Accumulate readings so we don't lose them!
                     batchRef.current = [...batchRef.current, ...normalizedReadings];
                     totalSamplesRef.current += normalizedReadings.length;
                     setSampleCount(totalSamplesRef.current);
 
-                    // Periodically chunk and send in background every 500 samples
-                    if (batchRef.current.length >= 500) {
-                        const chunkToSave = batchRef.current.splice(0, 500);
+                    // Periodically chunk and send in background every 3000 samples
+                    if (batchRef.current.length >= 3000) {
+                        const chunkToSave = batchRef.current.splice(0, 3000);
                         StorageService.saveSensorBatch({ readings: chunkToSave }).then(() => {
                             SyncEngine.syncAll();
                         }).catch(e => console.error("Continuous sync failed:", e));
-                    } else if (batchRef.current.length % 250 === 0 && batchRef.current.length > 0) {
+                    } else if (batchRef.current.length % 500 === 0 && batchRef.current.length > 0) {
                         // Periodically backup to local storage for crash recovery
                         StorageService.saveActiveSession(batchRef.current);
                     }
@@ -675,7 +690,15 @@ function PotholeDetection() {
             if (result.readings) {
                 const latestLoc = latestLocationRef.current;
                 const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
-                const normalizedReadings = result.readings.map((r: any) => canTagGps ? { ...r, lat: latestLoc.lat, lng: latestLoc.lng, session_id: sessionRef.current } : { ...r, session_id: sessionRef.current });
+                const normalizedReadings = result.readings.map((r: any) => {
+                    const hasNativeGps = r.lat !== 0 && r.lat !== undefined;
+                    return { 
+                        ...r, 
+                        lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat), 
+                        lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng), 
+                        session_id: sessionRef.current 
+                    };
+                });
                 
                 batchRef.current = [...batchRef.current, ...normalizedReadings];
                 totalSamplesRef.current += normalizedReadings.length;
@@ -980,14 +1003,64 @@ function HistoryFeed() {
     );
 }
 
+function ForcedUpdateModal({ updateUrl }: { updateUrl: string }) {
+    return (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-zinc-900/90 backdrop-blur-md p-6">
+            <div className="bg-white dark:bg-zinc-800 rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl border border-white/10">
+                <div className="w-20 h-20 bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <RefreshCw className="w-10 h-10 animate-spin-slow" />
+                </div>
+                <h2 className="text-2xl font-bold mb-2 text-gray-900 dark:text-white">Update Required</h2>
+                <p className="text-gray-500 dark:text-gray-400 mb-8">
+                    A new version of GRIP is available. Please update to continue using the app and protecting Goa.
+                </p>
+                <a
+                    href={updateUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-2xl shadow-lg transition-all transform active:scale-95"
+                >
+                    Download Update
+                </a>
+                <p className="mt-4 text-[10px] text-gray-400 uppercase tracking-widest font-bold">
+                    Version {CURRENT_APP_VERSION} → Latest
+                </p>
+            </div>
+        </div>
+    );
+}
+
 function App() {
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
+    const [needsUpdate, setNeedsUpdate] = useState(false);
+    const [updateUrl, setUpdateUrl] = useState("");
+
     useEffect(() => {
+        // Check for updates
+        const checkUpdate = async () => {
+            try {
+                const res = await fetch('https://api.github.com/repos/Adurao24874/React_mobile_app/releases/latest');
+                if (res.ok) {
+                    const data = await res.json();
+                    const latestVersion = data.tag_name;
+                    if (latestVersion && latestVersion !== CURRENT_APP_VERSION) {
+                        setUpdateUrl(data.html_url);
+                        setNeedsUpdate(true);
+                    }
+                }
+            } catch (e) {
+                console.error("Update check failed:", e);
+            }
+        };
+        checkUpdate();
+
         supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false); });
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
         return () => subscription.unsubscribe();
     }, []);
+
+    if (needsUpdate) return <ForcedUpdateModal updateUrl={updateUrl} />;
     if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-zinc-900"><div className="animate-spin rounded-full h-8 w-8 border-4 border-green-500 border-t-transparent"></div></div>;
     return (
         <Router>

@@ -3,6 +3,7 @@ package com.adars.grip;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -42,6 +43,10 @@ public class GripSensorService extends Service implements SensorEventListener, L
     private List<JSONObject> readings = new ArrayList<>();
     private double currentLat = 0;
     private double currentLng = 0;
+    private float currentSpeed = 0f;
+    private boolean isMoving = false;
+    private Long lowSpeedStart = null;
+    private List<Float> magHistory = new ArrayList<>();
     private long lastSavedTime = 0;
     private HandlerThread sensorThread;
     private Handler sensorHandler;
@@ -78,6 +83,7 @@ public class GripSensorService extends Service implements SensorEventListener, L
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setOngoing(true)
+                .setContentIntent(getContentIntent())
                 .build();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -149,6 +155,10 @@ public class GripSensorService extends Service implements SensorEventListener, L
             return;
         lastSavedTime = currentTime;
 
+        if (!shouldCollect(currentSpeed, lastAx, lastAy, lastAz)) {
+            return;
+        }
+
         try {
             JSONObject reading = new JSONObject();
             reading.put("accelX", lastAx);
@@ -159,6 +169,7 @@ public class GripSensorService extends Service implements SensorEventListener, L
             reading.put("gyroZ", lastGz);
             reading.put("lat", currentLat);
             reading.put("lng", currentLng);
+            reading.put("speed", currentSpeed);
             reading.put("timestamp", currentTime);
 
             readings.add(reading);
@@ -180,9 +191,20 @@ public class GripSensorService extends Service implements SensorEventListener, L
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setOngoing(true)
+                .setContentIntent(getContentIntent())
                 .build();
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         manager.notify(1, notification);
+    }
+
+    private PendingIntent getContentIntent() {
+        Intent notificationIntent = new Intent(this, MainActivity.class);
+        notificationIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        return PendingIntent.getActivity(this, 0, notificationIntent, flags);
     }
 
     // This service logic will be refined to match the exact JSON structure App.tsx
@@ -203,6 +225,46 @@ public class GripSensorService extends Service implements SensorEventListener, L
     public void onLocationChanged(Location location) {
         currentLat = location.getLatitude();
         currentLng = location.getLongitude();
+        if (location.hasSpeed()) {
+            currentSpeed = location.getSpeed();
+        }
+    }
+
+    private float getAccelVariance(float ax, float ay, float az) {
+        float magnitude = (float) Math.sqrt(ax * ax + ay * ay + az * az);
+        magHistory.add(magnitude);
+        if (magHistory.size() > 140) { // ~2 seconds at 70Hz
+            magHistory.remove(0);
+        }
+        
+        if (magHistory.size() < 2) return 0f;
+
+        float mean = 0;
+        for (float m : magHistory) mean += m;
+        mean /= magHistory.size();
+        
+        float variance = 0;
+        for (float m : magHistory) {
+            variance += (m - mean) * (m - mean);
+        }
+        return variance / magHistory.size();
+    }
+
+    private boolean shouldCollect(float speed, float ax, float ay, float az) {
+        float accelVariance = getAccelVariance(ax, ay, az);
+        long now = System.currentTimeMillis();
+
+        if (speed < 2.0f) {
+            if (lowSpeedStart == null) lowSpeedStart = now;
+            if (now - lowSpeedStart > 3000) {
+                isMoving = false;
+            }
+        } else {
+            lowSpeedStart = null;
+            isMoving = true;
+        }
+
+        return isMoving && accelVariance > 0.5f;
     }
 
     @Override

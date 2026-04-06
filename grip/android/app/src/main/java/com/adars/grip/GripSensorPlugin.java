@@ -26,7 +26,8 @@ import org.json.JSONArray;
 
 @CapacitorPlugin(name = "GripSensor", permissions = {
         @Permission(alias = "sensors", strings = { Manifest.permission.BODY_SENSORS }),
-        @Permission(alias = "activity", strings = { Manifest.permission.ACTIVITY_RECOGNITION })
+        @Permission(alias = "activity", strings = { Manifest.permission.ACTIVITY_RECOGNITION }),
+        @Permission(alias = "storage", strings = { Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE })
 })
 public class GripSensorPlugin extends Plugin {
     @Override

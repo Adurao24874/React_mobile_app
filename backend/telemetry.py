@@ -265,10 +265,10 @@ def classify_dataframe(
     gyro_scale: float = 0.1,
     peak_center_window_s: float = 2.0,
     rtp_pothole_ratio: float = 1.5,
-    hump_peak_thresh: float = 4.05,
-    hump_mag_thresh: float = 25.0,
+    hump_peak_thresh: float = 3.0,
+    hump_mag_thresh: float = 18.0,
     min_trough_abs: float = 4.0,
-    min_peak_abs: float = 4.0,
+    min_peak_abs: float = 3.0,
     axis_mode: str = 'gyro',
 ):
     """Classify a dataframe of samples into per-window events.
@@ -279,8 +279,8 @@ def classify_dataframe(
         raise ValueError('input dataframe must have timestamp column')
     # ensure numeric
     df = df.copy()
-    # ignore any pre-computed fields in the CSV — compute speed, vibration, anomaly ourselves
-    for _drop in ['speed','vibration_intensity','anomaly_score']:
+    # ignore any pre-computed fields in the CSV except 'speed'
+    for _drop in ['vibration_intensity','anomaly_score']:
         if _drop in df.columns:
             try:
                 df = df.drop(columns=[_drop])
@@ -329,17 +329,23 @@ def classify_dataframe(
     # precompute per-sample speed (km/h) using haversine between consecutive GPS
     lat = df['latitude'].astype(float).values if 'latitude' in df.columns else np.full(len(df), np.nan)
     lon = df['longitude'].astype(float).values if 'longitude' in df.columns else np.full(len(df), np.nan)
-    speed_mps = np.zeros(len(df))
-    speed_mps[:] = np.nan
-    for i in range(1, len(df)):
-        if math.isnan(lat[i]) or math.isnan(lat[i-1]):
-            continue
-        dist = haversine_meters(lat[i-1], lon[i-1], lat[i], lon[i])
-        dt = times_s[i] - times_s[i-1]
-        if dt <= 0:
-            continue
-        speed_mps[i] = dist / dt
-    speed_kph = speed_mps * 3.6
+    if 'speed' in df.columns and not df['speed'].isnull().all():
+        # Assume frontend sends speed in meters/second and use it directly
+        speed_mps = pd.to_numeric(df['speed'], errors='coerce').fillna(0.0).values
+        speed_kph = speed_mps * 3.6
+    else:
+        # Fallback to haversine calculation
+        speed_mps = np.zeros(len(df))
+        speed_mps[:] = np.nan
+        for i in range(1, len(df)):
+            if math.isnan(lat[i]) or math.isnan(lat[i-1]):
+                continue
+            dist = haversine_meters(lat[i-1], lon[i-1], lat[i], lon[i])
+            dt = times_s[i] - times_s[i-1]
+            if dt <= 0:
+                continue
+            speed_mps[i] = dist / dt
+        speed_kph = speed_mps * 3.6
     df['speed_kph'] = speed_kph
 
     # buffers and results
@@ -540,8 +546,8 @@ def classify_dataframe(
             symz = symmetry_score_z(v)
             if symz >= 0.70:
                 hump = True
-        # hump detection: strong positive peak, peak precedes trough and is symmetric
-        if P_val > 0 and P_val >= float(hump_peak_thresh) and abs(P_val) > float(min_peak_abs) and symmetry_score_z(v_sub) >= 0.6 and (global_P_idx < global_T_idx) and abs(delta_tp) < 0.6:
+        # hump detection: strong positive peak, peak precedes trough and is somewhat symmetric
+        if P_val > 0 and P_val >= float(hump_peak_thresh) and abs(P_val) > float(min_peak_abs) and symmetry_score_z(v_sub) >= 0.45 and (global_P_idx < global_T_idx) and abs(delta_tp) < 0.8:
             hump = True
         # Force hump if raw acceleration magnitude peaks above hump_mag_thresh (e.g., 20 m/s^2)
         try:

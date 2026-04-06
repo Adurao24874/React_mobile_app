@@ -201,6 +201,7 @@ def process_report(report):
 LABEL_PRIORITY = {
     'POTHOLE': 6,
     'HUMP': 5,
+    'avoided_obstacle': 4.5,
     'RUMBLE': 4,
     'BAD': 3,
     'MINOR': 2,
@@ -233,32 +234,41 @@ def process_sensors(batch):
         # Convert raw JSON dictionary array into a Pandas dataframe
         df = pd.DataFrame(readings)
         
-        # classify_dataframe expects timestamp in ms, accel_x/y/z.
-        # classify_dataframe expects timestamp in ms, accel_x/y/z.
-        # Let's map frontend names to legacy telemetry.py names
-        df = df.rename(columns={
-            'accelX': 'accel_x',
-            'accelY': 'accel_y',
-            'accelZ': 'accel_z',
-            'gyroX': 'gyro_x',
-            'gyroY': 'gyro_y',
-            'gyroZ': 'gyro_z',
-            'lat': 'latitude',
-            'lng': 'longitude'
-        })
-        
-        # Normalize GPS fields but do not forward/back-fill stale coordinates across entire batch.
-        if 'latitude' in df.columns and 'longitude' in df.columns:
-            df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-            df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+        if df.empty:
+            print("    ⚠️ Telemetry skipped: batch has 0 readings.")
+            # Skip physical analysis but don't fail the batch
+            events, _ = [], pd.DataFrame()
+        else:
+            # classify_dataframe expects timestamp in ms, accel_x/y/z.
+            # Let's map frontend names to legacy telemetry.py names
+            df = df.rename(columns={
+                'accelX': 'accel_x',
+                'accelY': 'accel_y',
+                'accelZ': 'accel_z',
+                'gyroX': 'gyro_x',
+                'gyroY': 'gyro_y',
+                'gyroZ': 'gyro_z',
+                'lat': 'latitude',
+                'lng': 'longitude'
+            })
             
-        # Run legacy apptesting extraction math (70 samples min = 0.7s)
-        events, _ = classify_dataframe(
-            df,
-            min_samples=50, # Set to 50 to match the new 50Hz app sampling rate
-            use_gyro=True,
-            axis_mode='gyro'
-        )
+            # Normalize GPS fields but do not forward/back-fill stale coordinates across entire batch.
+            if 'latitude' in df.columns and 'longitude' in df.columns:
+                df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+                df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+
+            # BACKEND SAFETY FILTER: Discard any sensor samples where vehicle is stopped or crawling
+            if 'speed' in df.columns:
+                df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
+                df = df[df['speed'] >= 2.0]
+                
+            # Run legacy apptesting extraction math (70 samples min = 0.7s)
+            events, _ = classify_dataframe(
+                df,
+                min_samples=50, # Set to 50 to match the new 50Hz app sampling rate
+                use_gyro=True,
+                axis_mode='gyro'
+            )
         
         print(f"    🗺️ Extracted {len(events)} physical street map points.")
         
@@ -338,7 +348,7 @@ def process_sensors(batch):
                         total_count = old_count + batch_count
                         new_rms = ((old_rms * old_count) + (batch_rms * batch_count)) / total_count
                         new_accel = ((old_accel * old_count) + (batch_accel * batch_count)) / total_count
-                        new_lateral = ((old_lateral * old_count) + (batch_lateral * batch_count)) / total_count
+                        new_lateral = ((old_lateral * old_count) + (batch_lateral_var * batch_count)) / total_count
                         
                         segments_to_upsert.append({
                             "segment_id": seg_id,
@@ -348,6 +358,7 @@ def process_sensors(batch):
                             "avg_accel": float(new_accel),
                             "lateral_variance": float(new_lateral),
                             "sample_count": total_count,
+                            "condition_label": batch_label,
                             "last_updated": now_iso
                         })
                     else:
@@ -359,6 +370,7 @@ def process_sensors(batch):
                             "avg_accel": batch_accel,
                             "lateral_variance": batch_lateral_var,
                             "sample_count": batch_count,
+                            "condition_label": batch_label,
                             "last_updated": now_iso
                         })
                         
@@ -400,12 +412,37 @@ def process_sensors(batch):
                         avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) # Weighted
                         
                         # STEP 7: CLASSIFY
-                        final_label = "smooth"
-                        if bump_score > 3.0: final_label = "pothole"
-                        elif is_low_coverage and confirmed_avoidance: final_label = "avoided_obstacle"
-                        elif bump_score > 1.5: final_label = "rough"
+                        # Start with the high-fidelity label from the telemetry pipeline
+                        final_label = seg.get('condition_label', 'GOOD')
                         
-                        # STEP 8: STORE RESULT
+                        # Apply spatial overrides or RMS upgrades while respecting high-priority existing labels
+                        if bump_score > 3.0: 
+                            final_label = "POTHOLE"
+                        elif is_low_coverage and confirmed_avoidance: 
+                            final_label = "avoided_obstacle"
+                        elif bump_score > 1.5:
+                            # Only upgrade to 'rough' if we don't already have a more specific label
+                            if final_label in ['GOOD', 'smooth', 'UNKNOWN']:
+                                final_label = "rough"
+                        
+                        # Final normalization to uppercase for consistency with legend where appropriate
+                        if final_label == 'smooth': final_label = 'GOOD'
+                        
+                        # STEP 8: PRIORITY MERGE (Prevent downgrading from a previous rider)
+                        # We use the 'old_label' we fetched earlier from existing data
+                        old_label = existing.get('label') if 'existing' in locals() else 'GOOD'
+                        if old_label is None: old_label = 'GOOD'
+                        
+                        new_prio = LABEL_PRIORITY.get(final_label, 0)
+                        old_prio = LABEL_PRIORITY.get(old_label, 0)
+                        
+                        # Only update if the new finding is MORE SEVERE or EQUAL to the old one.
+                        # This prevents a 'Good' ride from hiding a real 'Pothole'.
+                        if new_prio < old_prio:
+                            # Keep the old, more severe label
+                            final_label = old_label
+                        
+                        # STEP 9: STORE RESULT
                         conf = min(1.0, self_count / 200.0) # Simple confidence
                         supabase.table('road_segments').update({
                             "label": final_label,
@@ -419,8 +456,9 @@ def process_sensors(batch):
                     
         # STEP 9: CLEANUP
         print(f"    🧹 Cleaning up processed batch [{batch['id']}]...")
-        supabase.table('sensors').delete().eq("id", batch['id']).execute()
-        print("    ✅ Batch deleted.")
+        # REMOVED: Do not delete row, so that we can mark it 'completed' and 24h retention can handle it.
+        # supabase.table('sensors').delete().eq("id", batch['id']).execute()
+        print("    ✅ Batch processed, proceeding to mark complete.")
         
     except Exception as e:
         print(f"    ❌ Telemetry Physics failed: {e}")
@@ -439,39 +477,40 @@ def process_sensors(batch):
 
     print(f"--> 🏁 Finished Sensors [{batch.get('batch_id')}]\n")
 
-print("=======================================")
-print("🤖 GRIP Python Asynchronous Worker 🤖")
-print("=======================================")
-print("Polling Supabase every 2 seconds...")
+if __name__ == "__main__":
+    print("=======================================")
+    print("🤖 GRIP Python Asynchronous Worker 🤖")
+    print("=======================================")
+    print("Polling Supabase every 2 seconds...")
 
-while True:
-    try:
-        # Check active Reports (Camera images)
-        pending_reports = supabase.table('reports')\
-            .select('*')\
-            .eq('status', 'pending')\
-            .limit(1)\
-            .execute()
-            
-        if pending_reports.data and len(pending_reports.data) > 0:
-            process_report(pending_reports.data[0])
-            continue # Prioritize finishing all queue items quickly
-            
-        # Check passive Sensors (Telemetry)
-        # Assuming the 'sensors' table has a 'status' column we can rely on
-        pending_sensors = supabase.table('sensors')\
-            .select('*')\
-            .eq('status', 'pending')\
-            .neq('batch_id', 'SERVER_HEARTBEAT')\
-            .limit(1)\
-            .execute()
-            
-        if pending_sensors.data and len(pending_sensors.data) > 0:
-            process_sensors(pending_sensors.data[0])
-            continue
-            
-    except Exception as e:
-        print(f"⚠️ Polling Exception: {e}")
+    while True:
+        try:
+            # Check active Reports (Camera images)
+            pending_reports = supabase.table('reports')\
+                .select('*')\
+                .eq('status', 'pending')\
+                .limit(1)\
+                .execute()
+                
+            if pending_reports.data and len(pending_reports.data) > 0:
+                process_report(pending_reports.data[0])
+                continue # Prioritize finishing all queue items quickly
+                
+            # Check passive Sensors (Telemetry)
+            # Assuming the 'sensors' table has a 'status' column we can rely on
+            pending_sensors = supabase.table('sensors')\
+                .select('*')\
+                .eq('status', 'pending')\
+                .neq('batch_id', 'SERVER_HEARTBEAT')\
+                .limit(1)\
+                .execute()
+                
+            if pending_sensors.data and len(pending_sensors.data) > 0:
+                process_sensors(pending_sensors.data[0])
+                continue
+                
+        except Exception as e:
+            print(f"⚠️ Polling Exception: {e}")
 
-    # Don't fry the CPU while waiting
-    time.sleep(2)
+        # Don't fry the CPU while waiting
+        time.sleep(2)
