@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from PIL import Image
 from ultralytics import YOLO
+from spatial_grid import map_to_region, get_region_key
 
 # Thresholds for Avoidance Detection
 LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
@@ -293,9 +294,8 @@ def process_sensors(batch):
                 if not is_in_goa(event['latitude'], event['longitude']):
                     continue
                     
-                cell_x = int(lat / GRID_SIZE)
-                cell_y = int(lon / GRID_SIZE)
-                segment_id = f"{cell_x}_{cell_y}"
+                region = map_to_region(lat, lon, cell_size=GRID_SIZE)
+                segment_id = get_region_key(region["x"], region["y"], separator="_")
                 
                 segment_groups[segment_id].append(event)
             
