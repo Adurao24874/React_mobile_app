@@ -558,6 +558,35 @@ function PotholeDetection() {
     const latestLocationRef = useRef<{ lat: number, lng: number, accuracy: number } | null>(null);
     const sessionRef = useRef<string | null>(null);
     const totalSamplesRef = useRef<number>(0);
+    const regionMapRef = useRef<any>({});
+
+    // 🧠 REGION STORAGE HELPERS
+    const mapToRegion = (lat: number, lng: number, cellSize: number = 0.00001) => {
+        return {
+            x: Math.floor(lat / cellSize),
+            y: Math.floor(lng / cellSize),
+        };
+    };
+
+    const getRegionKey = (x: number, y: number) => {
+        return `${x},${y}`;
+    };
+
+    const updateRegion = (x: number, y: number, point: any, accel: number) => {
+        const key = getRegionKey(x, y);
+
+        if (!regionMapRef.current[key]) {
+            regionMapRef.current[key] = {
+                count: 0,
+                points: [],
+                accel: [],
+            };
+        }
+
+        regionMapRef.current[key].count++;
+        regionMapRef.current[key].points.push(point);
+        regionMapRef.current[key].accel.push(accel);
+    };
 
     const setupMonitoringListeners = async () => {
         if (typeof (DeviceMotionEvent as any).requestPermission === 'function') await (DeviceMotionEvent as any).requestPermission();
@@ -595,6 +624,15 @@ function PotholeDetection() {
                             lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng), 
                             session_id: sessionRef.current 
                         };
+                    });
+
+                    // 🧠 STEP 2: Store readings into regions for intelligence
+                    normalizedReadings.forEach((reading: any) => {
+                        if (reading.lat && reading.lng) {
+                            const region = mapToRegion(reading.lat, reading.lng);
+                            const accelMagnitude = Math.sqrt(reading.accelX ** 2 + reading.accelY ** 2 + reading.accelZ ** 2);
+                            updateRegion(region.x, region.y, { lat: reading.lat, lng: reading.lng }, reading.accelZ);
+                        }
                     });
 
                     // CRITICAL: Accumulate readings so we don't lose them!
