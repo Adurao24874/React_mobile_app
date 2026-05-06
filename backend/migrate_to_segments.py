@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from supabase import create_client, Client
 from collections import defaultdict
 import numpy as np
+from spatial_grid import map_to_region, get_region_key
 
 # 1. Initialize Supabase
 URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
@@ -50,9 +51,8 @@ for pt in all_conditions:
     lon = pt.get('longitude')
     if not lat or not lon or lat == 0 or lon == 0: continue
     
-    cell_x = int(lat / GRID_SIZE)
-    cell_y = int(lon / GRID_SIZE)
-    segment_id = f"{cell_x}_{cell_y}"
+    region = map_to_region(lat, lon, cell_size=GRID_SIZE)
+    segment_id = get_region_key(region['x'], region['y'], separator="_")
     segment_groups[segment_id].append(pt)
 
 print(f"Total unique segments to ensure: {len(segment_groups)}")

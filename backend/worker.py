@@ -8,6 +8,9 @@ from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from PIL import Image
 from ultralytics import YOLO
+from spatial_grid import map_to_region, get_region_key
+from region_analysis import find_avoided_regions, find_hotspot_regions, compute_density_ratio
+from statistics import compute_rms, compute_deviation, compute_peak_acceleration
 
 # Thresholds for Avoidance Detection
 LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
@@ -293,9 +296,8 @@ def process_sensors(batch):
                 if not is_in_goa(event['latitude'], event['longitude']):
                     continue
                     
-                cell_x = int(lat / GRID_SIZE)
-                cell_y = int(lon / GRID_SIZE)
-                segment_id = f"{cell_x}_{cell_y}"
+                region = map_to_region(lat, lon, cell_size=GRID_SIZE)
+                segment_id = get_region_key(region["x"], region["y"], separator="_")
                 
                 segment_groups[segment_id].append(event)
             
@@ -306,6 +308,28 @@ def process_sensors(batch):
                 print("    ⚠️ No valid segments found to upload (all events lacked coordinates).")
             else:
                 print(f"    📦 Grouped into {len(segment_groups)} unique segments.")
+                
+                # 🧠 STEP 3: DETECT AVOIDED REGIONS (Road Quality Intelligence)
+                region_map = {}
+                for seg_id, items in segment_groups.items():
+                    x, y = map(int, seg_id.split('_'))
+                    region_map[f"{x},{y}"] = {
+                        'count': len(items),
+                        'accel': [i.get('accel_z', 0.0) for i in items],
+                        'points': [(i.get('latitude'), i.get('longitude')) for i in items]
+                    }
+                
+                avoided_regions = find_avoided_regions(region_map, avoidance_threshold=0.5)
+                hotspot_regions = find_hotspot_regions(region_map, hotspot_threshold=1.5)
+                
+                if avoided_regions:
+                    print(f"    ⚠️ DETECTED {len(avoided_regions)} AVOIDED REGIONS (likely bad roads)")
+                    for avoid in avoided_regions[:5]:  # Log top 5
+                        print(f"       Region {avoid['key']}: ratio={avoid['density_ratio']:.2f}, visits={avoid['this_count']}, RMS={avoid['rms']:.2f}m/s², peak={avoid['peak_accel']:.2f}m/s²")
+                
+                if hotspot_regions:
+                    print(f"    ✅ DETECTED {len(hotspot_regions)} HOTSPOT REGIONS (popular routes)")
+                
                 seg_ids = list(segment_groups.keys())
                 existing_map = {}
                 try:
@@ -390,8 +414,11 @@ def process_sensors(batch):
                             x, y = int(parts[0]), int(parts[1])
                         except: continue
                         
-                        # Define neighbors
-                        neighbor_ids = [f"{x+1}_{y}", f"{x-1}_{y}", f"{x}_{y+1}", f"{x}_{y-1}", f"{x+1}_{y+1}", f"{x-1}_{y-1}"]
+                        # STEP 3: Define 8 neighbors (Cardinal + Diagonal)
+                        neighbor_ids = [
+                            f"{x+1}_{y}", f"{x-1}_{y}", f"{x}_{y+1}", f"{x}_{y-1}",  # Cardinal: N,S,E,W
+                            f"{x+1}_{y+1}", f"{x-1}_{y-1}", f"{x+1}_{y-1}", f"{x-1}_{y+1}"  # Diagonal: NE,SW,SE,NW
+                        ]
                         
                         # STEP 3: FETCH NEIGHBORS
                         n_res = supabase.table('road_segments').select('*').in_('segment_id', neighbor_ids).execute()
@@ -407,23 +434,30 @@ def process_sensors(batch):
                         is_low_coverage = self_count < (COVERAGE_RATIO * n_avg_count)
                         confirmed_avoidance = n_lat_avg > LATERAL_THRESHOLD
                         
-                        # STEP 6: SCORES
-                        bump_score = seg['avg_rms']
-                        avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) # Weighted
+                        # STEP 6: SCORES (Enhanced with density analysis)
+                        bump_score = seg['avg_rms']  # RMS vibration metric
                         
-                        # STEP 7: CLASSIFY
+                        # NEW: Compute density ratio using enhanced analysis
+                        segment_data = {'count': self_count}
+                        neighbor_data = [{'count': n['sample_count']} for n in neighbors]
+                        density_ratio = compute_density_ratio(segment_data, neighbor_data)
+                        
+                        # Weighted avoidance score now includes density signal
+                        avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) + (10 * max(0, 0.5 - density_ratio))
+                        
+                        # STEP 7: CLASSIFY (Enhanced with density & RMS metrics)
                         # Start with the high-fidelity label from the telemetry pipeline
                         final_label = seg.get('condition_label', 'GOOD')
                         
                         # Apply spatial overrides or RMS upgrades while respecting high-priority existing labels
                         if bump_score > 3.0: 
-                            final_label = "POTHOLE"
-                        elif is_low_coverage and confirmed_avoidance: 
-                            final_label = "avoided_obstacle"
+                            final_label = "POTHOLE"  # High RMS = extreme pothole
+                        elif (is_low_coverage and confirmed_avoidance) or (density_ratio < 0.5 and bump_score > 1.5):
+                            final_label = "avoided_obstacle"  # Low visits + high vibration = actively avoided
                         elif bump_score > 1.5:
                             # Only upgrade to 'rough' if we don't already have a more specific label
                             if final_label in ['GOOD', 'smooth', 'UNKNOWN']:
-                                final_label = "rough"
+                                final_label = "rough"  # Moderate RMS = rough road
                         
                         # Final normalization to uppercase for consistency with legend where appropriate
                         if final_label == 'smooth': final_label = 'GOOD'
