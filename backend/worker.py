@@ -10,6 +10,7 @@ from PIL import Image
 from ultralytics import YOLO
 from spatial_grid import map_to_region, get_region_key
 from region_analysis import find_avoided_regions, find_hotspot_regions, compute_density_ratio
+from statistics import compute_rms, compute_deviation, compute_peak_acceleration
 
 # Thresholds for Avoidance Detection
 LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
@@ -324,7 +325,7 @@ def process_sensors(batch):
                 if avoided_regions:
                     print(f"    ⚠️ DETECTED {len(avoided_regions)} AVOIDED REGIONS (likely bad roads)")
                     for avoid in avoided_regions[:5]:  # Log top 5
-                        print(f"       Region {avoid['key']}: ratio={avoid['density_ratio']:.2f}, visits={avoid['this_count']}, neighbors_avg={avoid['neighbors_avg']:.1f}")
+                        print(f"       Region {avoid['key']}: ratio={avoid['density_ratio']:.2f}, visits={avoid['this_count']}, RMS={avoid['rms']:.2f}m/s², peak={avoid['peak_accel']:.2f}m/s²")
                 
                 if hotspot_regions:
                     print(f"    ✅ DETECTED {len(hotspot_regions)} HOTSPOT REGIONS (popular routes)")
