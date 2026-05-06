@@ -414,8 +414,11 @@ def process_sensors(batch):
                             x, y = int(parts[0]), int(parts[1])
                         except: continue
                         
-                        # Define neighbors
-                        neighbor_ids = [f"{x+1}_{y}", f"{x-1}_{y}", f"{x}_{y+1}", f"{x}_{y-1}", f"{x+1}_{y+1}", f"{x-1}_{y-1}"]
+                        # STEP 3: Define 8 neighbors (Cardinal + Diagonal)
+                        neighbor_ids = [
+                            f"{x+1}_{y}", f"{x-1}_{y}", f"{x}_{y+1}", f"{x}_{y-1}",  # Cardinal: N,S,E,W
+                            f"{x+1}_{y+1}", f"{x-1}_{y-1}", f"{x+1}_{y-1}", f"{x-1}_{y+1}"  # Diagonal: NE,SW,SE,NW
+                        ]
                         
                         # STEP 3: FETCH NEIGHBORS
                         n_res = supabase.table('road_segments').select('*').in_('segment_id', neighbor_ids).execute()
@@ -431,23 +434,30 @@ def process_sensors(batch):
                         is_low_coverage = self_count < (COVERAGE_RATIO * n_avg_count)
                         confirmed_avoidance = n_lat_avg > LATERAL_THRESHOLD
                         
-                        # STEP 6: SCORES
-                        bump_score = seg['avg_rms']
-                        avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) # Weighted
+                        # STEP 6: SCORES (Enhanced with density analysis)
+                        bump_score = seg['avg_rms']  # RMS vibration metric
                         
-                        # STEP 7: CLASSIFY
+                        # NEW: Compute density ratio using enhanced analysis
+                        segment_data = {'count': self_count}
+                        neighbor_data = [{'count': n['sample_count']} for n in neighbors]
+                        density_ratio = compute_density_ratio(segment_data, neighbor_data)
+                        
+                        # Weighted avoidance score now includes density signal
+                        avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) + (10 * max(0, 0.5 - density_ratio))
+                        
+                        # STEP 7: CLASSIFY (Enhanced with density & RMS metrics)
                         # Start with the high-fidelity label from the telemetry pipeline
                         final_label = seg.get('condition_label', 'GOOD')
                         
                         # Apply spatial overrides or RMS upgrades while respecting high-priority existing labels
                         if bump_score > 3.0: 
-                            final_label = "POTHOLE"
-                        elif is_low_coverage and confirmed_avoidance: 
-                            final_label = "avoided_obstacle"
+                            final_label = "POTHOLE"  # High RMS = extreme pothole
+                        elif (is_low_coverage and confirmed_avoidance) or (density_ratio < 0.5 and bump_score > 1.5):
+                            final_label = "avoided_obstacle"  # Low visits + high vibration = actively avoided
                         elif bump_score > 1.5:
                             # Only upgrade to 'rough' if we don't already have a more specific label
                             if final_label in ['GOOD', 'smooth', 'UNKNOWN']:
-                                final_label = "rough"
+                                final_label = "rough"  # Moderate RMS = rough road
                         
                         # Final normalization to uppercase for consistency with legend where appropriate
                         if final_label == 'smooth': final_label = 'GOOD'
