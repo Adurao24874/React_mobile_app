@@ -9,6 +9,7 @@ from supabase import create_client, Client
 from PIL import Image
 from ultralytics import YOLO
 from spatial_grid import map_to_region, get_region_key
+from region_analysis import find_avoided_regions, find_hotspot_regions, compute_density_ratio
 
 # Thresholds for Avoidance Detection
 LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
@@ -306,6 +307,28 @@ def process_sensors(batch):
                 print("    ⚠️ No valid segments found to upload (all events lacked coordinates).")
             else:
                 print(f"    📦 Grouped into {len(segment_groups)} unique segments.")
+                
+                # 🧠 STEP 3: DETECT AVOIDED REGIONS (Road Quality Intelligence)
+                region_map = {}
+                for seg_id, items in segment_groups.items():
+                    x, y = map(int, seg_id.split('_'))
+                    region_map[f"{x},{y}"] = {
+                        'count': len(items),
+                        'accel': [i.get('accel_z', 0.0) for i in items],
+                        'points': [(i.get('latitude'), i.get('longitude')) for i in items]
+                    }
+                
+                avoided_regions = find_avoided_regions(region_map, avoidance_threshold=0.5)
+                hotspot_regions = find_hotspot_regions(region_map, hotspot_threshold=1.5)
+                
+                if avoided_regions:
+                    print(f"    ⚠️ DETECTED {len(avoided_regions)} AVOIDED REGIONS (likely bad roads)")
+                    for avoid in avoided_regions[:5]:  # Log top 5
+                        print(f"       Region {avoid['key']}: ratio={avoid['density_ratio']:.2f}, visits={avoid['this_count']}, neighbors_avg={avoid['neighbors_avg']:.1f}")
+                
+                if hotspot_regions:
+                    print(f"    ✅ DETECTED {len(hotspot_regions)} HOTSPOT REGIONS (popular routes)")
+                
                 seg_ids = list(segment_groups.keys())
                 existing_map = {}
                 try:
