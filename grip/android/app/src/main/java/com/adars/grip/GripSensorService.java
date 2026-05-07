@@ -107,9 +107,9 @@ public class GripSensorService extends Service implements SensorEventListener, L
         Sensor accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
         Sensor gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
 
-        // Use SENSOR_DELAY_FASTEST and 0 latency to prevent batching/suspension
-        sensorManager.registerListener(this, accel, SensorManager.SENSOR_DELAY_FASTEST, 0, sensorHandler);
-        sensorManager.registerListener(this, gyro, SensorManager.SENSOR_DELAY_FASTEST, 0, sensorHandler);
+        // Use 10000us (100Hz) and 0 latency to prevent batching/suspension and ensure consistent timing
+        sensorManager.registerListener(this, accel, 10000, 0, sensorHandler);
+        sensorManager.registerListener(this, gyro, 10000, 0, sensorHandler);
 
         startHeartbeat();
     }

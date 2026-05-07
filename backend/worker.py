@@ -4,6 +4,7 @@ import json
 import asyncio
 import math
 import threading
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from PIL import Image
@@ -17,10 +18,14 @@ LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
 COVERAGE_RATIO = 0.3      # Segment is considered 'avoided' if samples < 30% of neighbors
 MIN_SAMPLES = 50          # Minimum samples for label confidence
 
-# 1. Initialize Supabase
+# 1. Initialize Supabase with hardened connection settings
 URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
 KEY = "sb_publishable_DF1cQCw9e1eefh2b3y3gtA_OIUyZsem"
-supabase: Client = create_client(URL, KEY)
+
+# Increase timeout to 80s for unstable Goa network / large payloads
+from supabase.lib.client_options import ClientOptions
+opts = ClientOptions(postgrest_client_timeout=80) 
+supabase: Client = create_client(URL, KEY, options=opts)
 
 GOA_BOUNDS = {
     "min_lat": 14.8,
@@ -61,7 +66,7 @@ except Exception as e:
 
 # 3. Start Heartbeat Thread (Updated to also handle Storage Retention)
 def heartbeat_worker():
-    print("💓 Starting Server Heartbeat & Retention Monitor...")
+    print("Starting Server Heartbeat & Retention Monitor...")
     last_cleanup = datetime.now(timezone.utc) - timedelta(hours=1)
     
     while True:
@@ -135,7 +140,7 @@ def parse_yolo_results(results):
 
 # Process a single pending image report
 def process_report(report):
-    print(f"\n--> 📥 Picking up Pending Report [{report['id']}]")
+    print(f"\n--> Picking up Pending Report [{report['id']}]")
     image_path = report.get('image_path')
     if not image_path:
         print("    ⚠️ No image_path found, marking as failed.")
@@ -201,10 +206,42 @@ def process_report(report):
     # Results are updated in the DB, and the file is kept in Storage for 24h by the retention monitor
     print(f"--> 🏁 Finished Report [{report['id']}]\n")
 
+def reliable_execute(query_builder, retries=5):
+    for i in range(retries):
+        try:
+            return query_builder.execute()
+        except Exception as e:
+            err_str = str(e).lower()
+            # Retry on SSL/Transport errors
+            if i < retries - 1 and ("ssl" in err_str or "eof" in err_str or "connection" in err_str or "timeout" in err_str):
+                delay = 2 ** i
+                print(f"        Connection glitch, retrying in {delay}s... ({i+1}/{retries})")
+                time.sleep(delay)
+                continue
+            raise e
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2.0)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2.0)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+def interpolate_segments(lat1, lon1, lat2, lon2, step=3.0):
+    dist = haversine_m(lat1, lon1, lat2, lon2)
+    if dist <= step: return []
+    num_steps = int(dist // step)
+    points = []
+    for i in range(1, num_steps + 1):
+        ratio = i / (num_steps + 1)
+        points.append((lat1 + (lat2 - lat1) * ratio, lon1 + (lon2 - lon1) * ratio))
+    return points
+
 LABEL_PRIORITY = {
     'POTHOLE': 6,
     'HUMP': 5,
-    'avoided_obstacle': 4.5,
+    'OBSTACLE': 4.5,
     'RUMBLE': 4,
     'BAD': 3,
     'MINOR': 2,
@@ -212,20 +249,128 @@ LABEL_PRIORITY = {
     'UNKNOWN': 0
 }
 
+def fetch_neighbors(seg_id: str, existing_map: dict) -> list:
+    """
+    Given a segment_id like '833444_-226814', return the data rows
+    for all 8 surrounding grid cells from the already-loaded existing_map.
+    """
+    try:
+        x, y = map(int, seg_id.split('_'))
+    except ValueError:
+        return []
+    
+    neighbors = []
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            if dx == 0 and dy == 0:
+                continue  # skip self
+            neighbor_id = f"{x + dx}_{y + dy}"
+            if neighbor_id in existing_map:
+                neighbors.append(existing_map[neighbor_id])
+    return neighbors
+
+JUNCTION_CELL_CACHE_PATH = os.path.join(BASE_DIR, "junction_cells.json")
+JUNCTION_CELLS: set = set()
+
+def _latlon_to_sid(lat, lon, grid_size=0.000018):
+    return f"{int(lat / grid_size)}_{int(lon / grid_size)}"
+
+def load_junction_cells():
+    global JUNCTION_CELLS
+
+    if os.path.exists(JUNCTION_CELL_CACHE_PATH):
+        age_days = (datetime.now(timezone.utc) - datetime.fromtimestamp(
+            os.path.getmtime(JUNCTION_CELL_CACHE_PATH), tz=timezone.utc
+        )).days
+        if age_days < 7:
+            with open(JUNCTION_CELL_CACHE_PATH, 'r') as f:
+                JUNCTION_CELLS = set(json.load(f))
+            print(f"✅ Loaded {len(JUNCTION_CELLS)} junction cells from cache.")
+            return
+
+    print("🌐 Fetching junction data from OpenStreetMap Overpass API...")
+    query = """
+    [out:json][timeout:60];
+    (
+      way["junction"="roundabout"]
+        (14.8,73.6,15.9,74.35);
+      node["highway"="traffic_signals"]
+        (14.8,73.6,15.9,74.35);
+      node["highway"="stop"]
+        (14.8,73.6,15.9,74.35);
+    );
+    out geom;
+    """
+    try:
+        url = "https://overpass-api.de/api/interpreter"
+        data = urllib.request.urlopen(
+            urllib.request.Request(
+                url,
+                data=query.encode('utf-8'),
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            ),
+            timeout=60
+        ).read()
+        osm = json.loads(data)
+
+        cells = set()
+        for element in osm.get('elements', []):
+            if element.get('type') == 'way':
+                for node in element.get('geometry', []):
+                    sid = _latlon_to_sid(node['lat'], node['lon'])
+                    cells.add(sid)
+                    x, y = map(int, sid.split('_'))
+                    for dx in [-2, -1, 0, 1, 2]:
+                        for dy in [-2, -1, 0, 1, 2]:
+                            cells.add(f"{x+dx}_{y+dy}")
+
+            elif element.get('type') == 'node':
+                sid = _latlon_to_sid(element['lat'], element['lon'])
+                x, y = map(int, sid.split('_'))
+                for dx in [-2, -1, 0, 1, 2]:
+                    for dy in [-2, -1, 0, 1, 2]:
+                        cells.add(f"{x+dx}_{y+dy}")
+
+        JUNCTION_CELLS = cells
+        with open(JUNCTION_CELL_CACHE_PATH, 'w') as f:
+            json.dump(list(JUNCTION_CELLS), f)
+        print(f"✅ Built and cached {len(JUNCTION_CELLS)} junction suppression cells.")
+
+    except Exception as e:
+        print(f"⚠️ Overpass fetch failed, junction suppression disabled: {e}")
+        JUNCTION_CELLS = set()
+
+# Run once at startup
+load_junction_cells()
+
 def process_sensors(batch):
-    print(f"\n--> 📥 Picking up Pending Sensor Batch [{batch.get('batch_id')}]")
+    print(f"\n--> Picking up Pending Sensor Batch [{batch.get('batch_id')}]")
+    
+    # Immediately mark as processing to prevent race conditions
+    if not batch.get('id', '').startswith('local_import_'):
+        supabase.table('sensors').update({"status": "processing"}).eq("id", batch['id']).execute()
+        
     file_path = batch.get('local_file_path')
     
-    # 1. Download JSON from Storage
-    print(f"    ⬇️ Downloading {file_path} from Storage...")
+    # 1. Load JSON (from Storage or Local File)
+    readings = []
     try:
-        res = supabase.storage.from_('reports').download(file_path)
-        payload = json.loads(res.decode('utf-8'))
-        readings = payload.get('readings', [])
+        if batch.get('id', '').startswith('local_import_'):
+            print(f"    📖 Reading local file: {file_path}")
+            with open(file_path, 'r') as f:
+                payload = json.load(f)
+            readings = payload.get('readings', [])
+        else:
+            print(f"    ⬇️ Downloading {file_path} from Storage...")
+            res = supabase.storage.from_('reports').download(file_path)
+            payload = json.loads(res.decode('utf-8'))
+            readings = payload.get('readings', [])
+            
         print(f"    📊 Loaded {len(readings)} sensor samples into RAM")
     except Exception as e:
-        print(f"    ❌ Failed to download or read sensors: {e}")
-        supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
+        print(f"    ❌ Failed to load sensors: {e}")
+        if not batch.get('id', '').startswith('local_import_'):
+            supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
         return
 
     # 2. Run Python Telemetry Pipeline
@@ -234,317 +379,334 @@ def process_sensors(batch):
         import pandas as pd
         from telemetry import classify_dataframe
         
-        # Convert raw JSON dictionary array into a Pandas dataframe
         df = pd.DataFrame(readings)
         
         if df.empty:
             print("    ⚠️ Telemetry skipped: batch has 0 readings.")
-            # Skip physical analysis but don't fail the batch
-            events, _ = [], pd.DataFrame()
+            events = []
         else:
-            # classify_dataframe expects timestamp in ms, accel_x/y/z.
-            # Let's map frontend names to legacy telemetry.py names
             df = df.rename(columns={
-                'accelX': 'accel_x',
-                'accelY': 'accel_y',
-                'accelZ': 'accel_z',
-                'gyroX': 'gyro_x',
-                'gyroY': 'gyro_y',
-                'gyroZ': 'gyro_z',
-                'lat': 'latitude',
-                'lng': 'longitude'
+                'accelX': 'accel_x', 'accelY': 'accel_y', 'accelZ': 'accel_z',
+                'gyroX': 'gyro_x', 'gyroY': 'gyro_y', 'gyroZ': 'gyro_z',
+                'lat': 'latitude', 'lng': 'longitude'
             })
             
-            # Normalize GPS fields but do not forward/back-fill stale coordinates across entire batch.
             if 'latitude' in df.columns and 'longitude' in df.columns:
                 df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
                 df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
 
-            # BACKEND SAFETY FILTER: Discard any sensor samples where vehicle is stopped or crawling
             if 'speed' in df.columns:
                 df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
                 df = df[df['speed'] >= 2.0]
                 
-            # Run legacy apptesting extraction math (70 samples min = 0.7s)
             events, _ = classify_dataframe(
                 df,
-                min_samples=50, # Set to 50 to match the new 50Hz app sampling rate
+                min_samples=50,
                 use_gyro=True,
                 axis_mode='gyro'
             )
         
         print(f"    🗺️ Extracted {len(events)} physical street map points.")
         
-        # 3. Push coordinates to Map Visualization Database as Segments
+        # 3. SPATIAL AGGREGATION WITH INTERPOLATION
         if len(events) > 0:
-            print(f"    📤 Aggregating {len(events)} events into segments...")
+            print(f"    📤 Aggregating and Interpolating {len(events)} events...")
             from collections import defaultdict
             import numpy as np
             
-            # Group events into 3-meter bins
             segment_groups = defaultdict(list)
-            GRID_SIZE = 0.00003
+            GRID_SIZE = 0.000018  # Approx 2x2 meters
             
-            skipped_coords = 0
-            for event in events:
-                lat = event.get('latitude')
-                lon = event.get('longitude')
-                if lat is None or lon is None or math.isnan(lat) or math.isnan(lon) or (lat == 0 and lon == 0):
-                    skipped_coords += 1
-                    continue
+            def generate_sid(lat, lon):
+                # Standardize grid cells for better merging and return EXACT snapped center
+                sid_x = int(lat / GRID_SIZE)
+                sid_y = int(lon / GRID_SIZE)
+                snapped_lat = (sid_x + 0.5) * GRID_SIZE
+                snapped_lng = (sid_y + 0.5) * GRID_SIZE
+                return f"{sid_x}_{sid_y}", snapped_lat, snapped_lng
 
-                if not is_in_goa(event['latitude'], event['longitude']):
-                    continue
-                    
-                region = map_to_region(lat, lon, cell_size=GRID_SIZE)
-                segment_id = get_region_key(region["x"], region["y"], separator="_")
-                
-                segment_groups[segment_id].append(event)
+            sorted_events = sorted(events, key=lambda x: x['timestamp'])
+
             
-            if skipped_coords > 0:
-                print(f"    ⚠️ Skipped {skipped_coords} events due to missing/zero GPS coordinates")
+            for i, ev in enumerate(sorted_events):
+                lat_p, lng_p = ev['latitude'], ev['longitude']
+                if lat_p is None or lng_p is None or math.isnan(lat_p) or math.isnan(lng_p) or (lat_p == 0 and lng_p == 0) or not is_in_goa(lat_p, lng_p):
+                    continue
                 
+                # 3.1 Primary Point
+                seg_p, snapped_lat, snapped_lng = generate_sid(lat_p, lng_p)
+                # Store snapped coordinates in event to use as single source of truth
+                ev['_snapped_lat'] = snapped_lat
+                ev['_snapped_lng'] = snapped_lng
+                segment_groups[seg_p].append(ev)
+                
+                # 3.2 Path Filling (Interpolate to next point if exists)
+                if i < len(sorted_events) - 1:
+                    next_ev = sorted_events[i+1]
+                    time_gap = next_ev['timestamp'] - ev['timestamp']
+                    spatial_gap = haversine_m(lat_p, lng_p, next_ev['latitude'], next_ev['longitude'])
+                    
+                    # Only interpolate if within 1s AND 10m
+                    if time_gap < 1000 and spatial_gap < 10.0:
+                        gaps = interpolate_segments(lat_p, lng_p, next_ev['latitude'], next_ev['longitude'])
+                        for g_lat, g_lng in gaps:
+                            g_seg, g_snapped_lat, g_snapped_lng = generate_sid(g_lat, g_lng)
+                            if g_seg != seg_p:
+                                # Create a virtual event for this segment, wiping out inherited hazard data
+                                g_ev = ev.copy()
+                                g_ev['latitude'], g_ev['longitude'] = g_lat, g_lng
+                                g_ev['_snapped_lat'] = g_snapped_lat
+                                g_ev['_snapped_lng'] = g_snapped_lng
+                                g_ev['label'] = 'GOOD'
+                                g_ev['vibration_intensity'] = 0.0
+                                g_ev['lateral_variance'] = 0.0
+                                g_ev['_is_interpolated'] = True
+                                segment_groups[g_seg].append(g_ev)
+            
             if not segment_groups:
-                print("    ⚠️ No valid segments found to upload (all events lacked coordinates).")
+                print("    ⚠️ No valid segments found.")
             else:
-                print(f"    📦 Grouped into {len(segment_groups)} unique segments.")
+                print(f"    📦 Mapped into {len(segment_groups)} road segments.")
+                expanded_seg_ids = set()
+                for seg_id in segment_groups.keys():
+                    try:
+                        x, y = map(int, seg_id.split('_'))
+                        for dx in [-1, 0, 1]:
+                            for dy in [-1, 0, 1]:
+                                expanded_seg_ids.add(f"{x + dx}_{y + dy}")
+                    except ValueError:
+                        continue
                 
-                # 🧠 STEP 3: DETECT AVOIDED REGIONS (Road Quality Intelligence)
-                region_map = {}
-                for seg_id, items in segment_groups.items():
-                    x, y = map(int, seg_id.split('_'))
-                    region_map[f"{x},{y}"] = {
-                        'count': len(items),
-                        'accel': [i.get('accel_z', 0.0) for i in items],
-                        'points': [(i.get('latitude'), i.get('longitude')) for i in items]
-                    }
-                
-                avoided_regions = find_avoided_regions(region_map, avoidance_threshold=0.5)
-                hotspot_regions = find_hotspot_regions(region_map, hotspot_threshold=1.5)
-                
-                if avoided_regions:
-                    print(f"    ⚠️ DETECTED {len(avoided_regions)} AVOIDED REGIONS (likely bad roads)")
-                    for avoid in avoided_regions[:5]:  # Log top 5
-                        print(f"       Region {avoid['key']}: ratio={avoid['density_ratio']:.2f}, visits={avoid['this_count']}, RMS={avoid['rms']:.2f}m/s², peak={avoid['peak_accel']:.2f}m/s²")
-                
-                if hotspot_regions:
-                    print(f"    ✅ DETECTED {len(hotspot_regions)} HOTSPOT REGIONS (popular routes)")
-                
-                seg_ids = list(segment_groups.keys())
+                seg_ids_list = list(expanded_seg_ids)
                 existing_map = {}
-                try:
-                    # Fetch existing segments to do running averages
-                    res = supabase.table('road_segments').select('*').in_('segment_id', seg_ids).execute()
+                for i in range(0, len(seg_ids_list), 200):
+                    chunk = seg_ids_list[i:i+200]
+                    res = reliable_execute(supabase.table('road_segments').select('*').in_('segment_id', chunk))
                     if res.data:
-                        for row in res.data:
-                            existing_map[row['segment_id']] = row
-                except Exception as e:
-                    print(f"        ⚠️ Failed to fetch existing segments: {e}")
+                        for row in res.data: existing_map[row['segment_id']] = row
                 
                 segments_to_upsert = []
                 now_iso = datetime.now(timezone.utc).isoformat()
                 
+                batch_id = batch.get('batch_id')
+                if not batch_id or batch_id == 'unknown':
+                    batch_id = f"unknown_{int(time.time())}"
+                    
+                def sf(v): return 0.0 if math.isnan(float(v)) or math.isinf(float(v)) else float(v)
+
                 for seg_id, items in segment_groups.items():
-                    # STEP 1: COMPUTE BATCH STATS
-                    batch_rms = float(np.mean([i['vibration_intensity'] for i in items if 'vibration_intensity' in i]))
-                    batch_accel = float(np.mean([i.get('accel_z', 0.0) for i in items])) # avg_vertical_accel
+                    # Check if all items are pure interpolations (path-filling only)
+                    real_items = [i for i in items if not i.get('_is_interpolated')]
+                    if not real_items:
+                        continue # Don't write pure interpolation cells to the DB
+
+                    batch_rms = float(np.mean([i['vibration_intensity'] for i in items]))
                     batch_count = sum([i.get('samples', 50) for i in items])
                     batch_lateral_var = float(np.mean([i.get('lateral_variance', 0.0) for i in items]))
                     
-                    # Pick the highest priority label seen in the batch as a starting point
                     batch_label = 'GOOD'
                     max_prio = 0
                     for i in items:
-                        prio = LABEL_PRIORITY.get(i.get('label', 'GOOD'), 0)
-                        if prio > max_prio:
-                            max_prio = prio
-                            batch_label = i.get('label', 'GOOD')
+                        p = LABEL_PRIORITY.get(i.get('label', 'GOOD'), 0)
+                        if p > max_prio: max_prio = p; batch_label = i.get('label', 'GOOD')
                     
-                    # STEP 2: WEIGHTED UPDATE
+                    # Snap coordinates to grid center using the single source of truth
+                    snapped_lat = items[0]['_snapped_lat']
+                    snapped_lng = items[0]['_snapped_lng']
+
                     if seg_id in existing_map:
                         existing = existing_map[seg_id]
-                        old_rms = existing.get('avg_rms') or 0.0
-                        old_accel = existing.get('avg_accel') or 0.0
                         old_count = existing.get('sample_count') or 0
-                        old_lateral = existing.get('lateral_variance') or 0.0
-                        old_label = existing.get('label') or 'smooth'
-                        
                         total_count = old_count + batch_count
-                        new_rms = ((old_rms * old_count) + (batch_rms * batch_count)) / total_count
-                        new_accel = ((old_accel * old_count) + (batch_accel * batch_count)) / total_count
-                        new_lateral = ((old_lateral * old_count) + (batch_lateral_var * batch_count)) / total_count
+                        new_rms = ((float(existing.get('avg_rms') or 0.0) * old_count) + (batch_rms * batch_count)) / total_count
+                        new_lateral = ((float(existing.get('lateral_variance') or 0.0) * old_count) + (batch_lateral_var * batch_count)) / total_count
                         
-                        segments_to_upsert.append({
-                            "segment_id": seg_id,
-                            "latitude": existing.get('latitude', items[0]['latitude']),
-                            "longitude": existing.get('longitude', items[0]['longitude']),
-                            "avg_rms": float(new_rms),
-                            "avg_accel": float(new_accel),
-                            "lateral_variance": float(new_lateral),
-                            "sample_count": total_count,
-                            "condition_label": batch_label,
-                            "last_updated": now_iso
-                        })
+                        # MULTI-SESSION AVOIDANCE & REPAIR LOGIC
+                        sw_hits = existing.get('swerving_hits') or 0
+                        cl_hits = existing.get('clear_hits') or 0
+                        sess_hits = existing.get('session_hits') or []
+                        
+                        existing_label = existing.get('label') or 'GOOD'
+                        existing_prio = LABEL_PRIORITY.get(existing_label, 0)
+                        batch_prio = LABEL_PRIORITY.get(batch_label, 0)
+                        
+                        # TIME-BASED DECAY FOR GHOST OBSTACLES
+                        last_updated = existing.get('last_updated')
+                        if last_updated:
+                            # Safely handle potential parsing issues
+                            try:
+                                # Supabase isoformat sometimes includes 'Z' or offset, replace Z with +00:00 for strict parsing
+                                lu_str = last_updated.replace('Z', '+00:00')
+                                age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(lu_str)).days
+                                # Decay 1 swerving hit per 30 days of no new data
+                                sw_hits = max(0, sw_hits - (age_days // 30))
+                                
+                                # Re-evaluate completely healed decayed obstacles from fresh data
+                                if sw_hits == 0 and existing_label == 'OBSTACLE':
+                                    existing_label = batch_label
+                                    existing_prio = LABEL_PRIORITY.get(existing_label, 0) # Keep priority in sync
+                            except Exception:
+                                pass
+                        
+                        if batch_id not in sess_hits:
+                            if batch_lateral_var > LATERAL_THRESHOLD:
+                                sw_hits += 1
+                                cl_hits = 0 # Reset clearing if we swerve again
+                            elif batch_prio <= 2 and existing_prio > 2:
+                                # Multi-person repair logic: road was bad, now reported good
+                                cl_hits += 1
+                            elif existing_label == 'OBSTACLE':
+                                cl_hits += 1
+                            elif batch_prio >= existing_prio and existing_prio > 2:
+                                cl_hits = 0 # Only block healing for genuinely bad roads
+                            
+                            sess_hits.append(batch_id)
+                            if len(sess_hits) > 50: sess_hits.pop(0)
+
+                        final_label = existing_label
+                        
+                        # Upgrade immediately if new condition is worse
+                        if batch_prio > existing_prio:
+                            final_label = batch_label
+                            
+                        # If multiple people pass without issue, the road is fixed!
+                        if cl_hits >= 3:
+                            sw_hits = 0
+                            cl_hits = 0
+                            final_label = batch_label # Returns to normal (GOOD/MINOR)
+                            
+                        final_total_count = int(total_count)
+                        final_rms = sf(new_rms)
+                        final_lateral = sf(new_lateral)
                     else:
-                        segments_to_upsert.append({
-                            "segment_id": seg_id,
-                            "latitude": items[0]['latitude'],
-                            "longitude": items[0]['longitude'],
-                            "avg_rms": batch_rms,
-                            "avg_accel": batch_accel,
-                            "lateral_variance": batch_lateral_var,
-                            "sample_count": batch_count,
-                            "condition_label": batch_label,
-                            "last_updated": now_iso
-                        })
+                        # New segments start with swerved_hits=1 if this batch swerved
+                        sw_hits = 1 if batch_lateral_var > LATERAL_THRESHOLD else 0
+                        cl_hits = 0
+                        sess_hits = [batch_id]
+                        final_label = batch_label # Labels don't become OBSTACLE on first hit
+                        final_total_count = int(batch_count)
+                        final_rms = sf(batch_rms)
+                        final_lateral = sf(batch_lateral_var)
+
+                    # ── PREDICTIVE SPATIAL AVOIDANCE ──────────────────
+                    neighbors = fetch_neighbors(seg_id, existing_map)
+
+                    if neighbors:
+                        avg_neighbor_samples = float(np.mean([
+                            n.get('sample_count', 0) for n in neighbors
+                        ]))
+                        avg_neighbor_lateral = float(np.mean([
+                            float(n.get('lateral_variance') or 0.0) for n in neighbors
+                        ]))
                         
-                try:
-                    # Initial Upsert to update basic stats
-                    supabase.table('road_segments').upsert(segments_to_upsert).execute()
-                    print(f"    ✅ Updated stats for {len(segments_to_upsert)} segments.")
-                    
-                    # STEP 3-8: SPATIAL AVOIDANCE ANALYSIS
-                    print("    🔍 Performing Spatial Avoidance Analysis...")
-                    all_updated_ids = [s['segment_id'] for s in segments_to_upsert]
-                    
-                    for seg in segments_to_upsert:
-                        seg_id = seg['segment_id']
-                        try:
-                            parts = seg_id.split('_')
-                            x, y = int(parts[0]), int(parts[1])
-                        except: continue
+                        self_samples = float(final_total_count)
+                        coverage_ratio = (self_samples / avg_neighbor_samples
+                                           if avg_neighbor_samples > 0 else 1.0)
                         
-                        # STEP 3: Define 8 neighbors (Cardinal + Diagonal)
-                        neighbor_ids = [
-                            f"{x+1}_{y}", f"{x-1}_{y}", f"{x}_{y+1}", f"{x}_{y-1}",  # Cardinal: N,S,E,W
-                            f"{x+1}_{y+1}", f"{x-1}_{y-1}", f"{x+1}_{y-1}", f"{x-1}_{y+1}"  # Diagonal: NE,SW,SE,NW
-                        ]
+                        # Condition A: Path density (people avoiding this cell)
+                        cond_a = coverage_ratio < COVERAGE_RATIO and self_samples >= MIN_SAMPLES
+
+                        # Condition B: Neighbors confirm swerving around it
+                        cond_b = avg_neighbor_lateral > LATERAL_THRESHOLD
+
+                        if cond_a and cond_b and seg_id not in JUNCTION_CELLS:
+                            final_label = 'OBSTACLE'
                         
-                        # STEP 3: FETCH NEIGHBORS
-                        n_res = supabase.table('road_segments').select('*').in_('segment_id', neighbor_ids).execute()
-                        neighbors = n_res.data if n_res.data else []
-                        
-                        if not neighbors: continue
-                        
-                        # Compute neighbor stats
-                        n_avg_count = np.mean([n['sample_count'] for n in neighbors])
-                        n_lat_avg = np.mean([n['lateral_variance'] for n in neighbors])
-                        
-                        self_count = seg['sample_count']
-                        is_low_coverage = self_count < (COVERAGE_RATIO * n_avg_count)
-                        confirmed_avoidance = n_lat_avg > LATERAL_THRESHOLD
-                        
-                        # STEP 6: SCORES (Enhanced with density analysis)
-                        bump_score = seg['avg_rms']  # RMS vibration metric
-                        
-                        # NEW: Compute density ratio using enhanced analysis
-                        segment_data = {'count': self_count}
-                        neighbor_data = [{'count': n['sample_count']} for n in neighbors]
-                        density_ratio = compute_density_ratio(segment_data, neighbor_data)
-                        
-                        # Weighted avoidance score now includes density signal
-                        avoidance_score = (n_avg_count - self_count) + (n_lat_avg * 10) + (10 * max(0, 0.5 - density_ratio))
-                        
-                        # STEP 7: CLASSIFY (Enhanced with density & RMS metrics)
-                        # Start with the high-fidelity label from the telemetry pipeline
-                        final_label = seg.get('condition_label', 'GOOD')
-                        
-                        # Apply spatial overrides or RMS upgrades while respecting high-priority existing labels
-                        if bump_score > 3.0: 
-                            final_label = "POTHOLE"  # High RMS = extreme pothole
-                        elif (is_low_coverage and confirmed_avoidance) or (density_ratio < 0.5 and bump_score > 1.5):
-                            final_label = "avoided_obstacle"  # Low visits + high vibration = actively avoided
-                        elif bump_score > 1.5:
-                            # Only upgrade to 'rough' if we don't already have a more specific label
-                            if final_label in ['GOOD', 'smooth', 'UNKNOWN']:
-                                final_label = "rough"  # Moderate RMS = rough road
-                        
-                        # Final normalization to uppercase for consistency with legend where appropriate
-                        if final_label == 'smooth': final_label = 'GOOD'
-                        
-                        # STEP 8: PRIORITY MERGE (Prevent downgrading from a previous rider)
-                        # We use the 'old_label' we fetched earlier from existing data
-                        old_label = existing.get('label') if 'existing' in locals() else 'GOOD'
-                        if old_label is None: old_label = 'GOOD'
-                        
-                        new_prio = LABEL_PRIORITY.get(final_label, 0)
-                        old_prio = LABEL_PRIORITY.get(old_label, 0)
-                        
-                        # Only update if the new finding is MORE SEVERE or EQUAL to the old one.
-                        # This prevents a 'Good' ride from hiding a real 'Pothole'.
-                        if new_prio < old_prio:
-                            # Keep the old, more severe label
-                            final_label = old_label
-                        
-                        # STEP 9: STORE RESULT
-                        conf = min(1.0, self_count / 200.0) # Simple confidence
-                        supabase.table('road_segments').update({
-                            "label": final_label,
-                            "confidence_score": float(conf)
-                        }).eq("segment_id", seg_id).execute()
-                        
-                    print("    ✨ Avoidance labels prioritized and updated.")
-                    
-                except Exception as insert_err:
-                    print(f"        ⚠️ Spatial Analysis error: {insert_err}")
-                    
-        # STEP 9: CLEANUP
-        print(f"    🧹 Cleaning up processed batch [{batch['id']}]...")
-        # REMOVED: Do not delete row, so that we can mark it 'completed' and 24h retention can handle it.
-        # supabase.table('sensors').delete().eq("id", batch['id']).execute()
-        print("    ✅ Batch processed, proceeding to mark complete.")
+                        # Autonomous resolution: traffic returns to normal
+                        elif coverage_ratio >= COVERAGE_RATIO and final_label == 'OBSTACLE':
+                            final_label = batch_label  # Road is clear again
+                            sw_hits = 0
+                            cl_hits = 0
+                    else:
+                        # No neighbors yet — fall back to single-segment sw_hits logic
+                        if sw_hits >= 3 and cl_hits < 3:
+                            final_label = 'OBSTACLE'
+
+                    segments_to_upsert.append({
+                        "segment_id": seg_id,
+                        "latitude": sf(snapped_lat),
+                        "longitude": sf(snapped_lng),
+                        "avg_rms": final_rms,
+                        "lateral_variance": final_lateral,
+                        "sample_count": final_total_count,
+                        "label": final_label,
+                        "swerving_hits": int(sw_hits),
+                        "clear_hits": int(cl_hits),
+                        "session_hits": sess_hits,
+                        "last_updated": now_iso
+                    })
+                
+                # Tiny Chunk Upsert
+                for i in range(0, len(segments_to_upsert), 20):
+                    chunk = segments_to_upsert[i:i+20]
+                    # Dynamically inject confidence score before upsert to avoid redundant loop
+                    for c in chunk:
+                        c['confidence_score'] = min(1.0, c['sample_count'] / 500.0)
+                    reliable_execute(supabase.table('road_segments').upsert(chunk))
+                    time.sleep(0.1)
+                
+                print(f"    ✅ Aggregated updates complete.")
+                
+                # BATCH SUMMARY (per user request)
+                print("\n    📊 --- BATCH SUMMARY ---")
+                from collections import Counter
+                counts = Counter([seg['label'] for seg in segments_to_upsert])
+                for label, count in sorted(counts.items(), key=lambda x: LABEL_PRIORITY.get(x[0], 0), reverse=True):
+                    print(f"    {label:<15} : {count}")
+                print("    ------------------------\n")
+                
+        print(f"    Batch processed successfully.")
+  print(f"    Batch processed successfully.")
+>>>>>>> d52475d (Finalize spatial telemetry pipeline, avoidance logic, and government dashboard integration)
         
     except Exception as e:
-        print(f"    ❌ Telemetry Physics failed: {e}")
-        supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
+        print(f"    ❌ Critical Error: {e}")
+        if not batch.get('id', '').startswith('local_import_'):
+            supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
         return
     
     # Complete Workflow
-    print("    📤 Marking batch Completed...")
-    try:
-        supabase.table('sensors').update({
-            "status": "completed"
-        }).eq("id", batch['id']).execute()
-    except Exception as e:
-        print(f"    ❌ Database update failed: {e}")
-        return
+    if not batch.get('id', '').startswith('local_import_'):
+        print("    Marking batch Completed...")
+        supabase.table('sensors').update({"status": "completed"}).eq("id", batch['id']).execute()
 
-    print(f"--> 🏁 Finished Sensors [{batch.get('batch_id')}]\n")
+    print(f"--> Finished Sensors [{batch.get('batch_id')}]\n")
 
 if __name__ == "__main__":
+    import sys
+    # Handle direct file processing
+    if len(sys.argv) > 1 and sys.argv[1].endswith(".json"):
+        lp = sys.argv[1]
+        print(f"--- Local Batch Mode: {lp} ---")
+        try:
+            # We don't read data here, process_sensors will do it
+            dummy = {
+                "id": "local_import_" + datetime.now().strftime("%H%M%S"),
+                "batch_id": os.path.basename(lp),
+                "local_file_path": lp
+            }
+            process_sensors(dummy)
+            print("--- Local Processing Done ---")
+        except Exception as ex: print(f"Failed: {ex}")
+        sys.exit(0)
+
     print("=======================================")
-    print("🤖 GRIP Python Asynchronous Worker 🤖")
+    print("GRIP Python Asynchronous Worker")
     print("=======================================")
     print("Polling Supabase every 2 seconds...")
 
     while True:
         try:
             # Check active Reports (Camera images)
-            pending_reports = supabase.table('reports')\
-                .select('*')\
-                .eq('status', 'pending')\
-                .limit(1)\
-                .execute()
-                
-            if pending_reports.data and len(pending_reports.data) > 0:
-                process_report(pending_reports.data[0])
-                continue # Prioritize finishing all queue items quickly
-                
-            # Check passive Sensors (Telemetry)
-            # Assuming the 'sensors' table has a 'status' column we can rely on
-            pending_sensors = supabase.table('sensors')\
-                .select('*')\
-                .eq('status', 'pending')\
-                .neq('batch_id', 'SERVER_HEARTBEAT')\
-                .limit(1)\
-                .execute()
-                
-            if pending_sensors.data and len(pending_sensors.data) > 0:
-                process_sensors(pending_sensors.data[0])
-                continue
-                
+            pending_reports = supabase.table('reports').select('*').eq('status', 'pending').limit(1).execute()
+            for r in pending_reports.data:
+                process_report(r)
+
+            # Check active Sensors (JSON Telemetry)
+            pending_sensors = supabase.table('sensors').select('*').eq('status', 'pending').limit(1).execute()
+            for s in pending_sensors.data:
+                process_sensors(s)
+
         except Exception as e:
             print(f"⚠️ Polling Exception: {e}")
-
-        # Don't fry the CPU while waiting
         time.sleep(2)

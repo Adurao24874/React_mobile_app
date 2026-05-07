@@ -1,14 +1,16 @@
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, Navigate } from 'react-router-dom';
-import { Camera, MapPin, Activity, History, ArrowRight, ArrowLeft, CheckCircle2, Layers, RefreshCw, LogOut } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { Camera, MapPin, Activity, History, ArrowRight, ArrowLeft, CheckCircle2, Layers, RefreshCw, LogOut, Volume2, VolumeX } from 'lucide-react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Camera as CapCamera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Geolocation } from '@capacitor/geolocation';
 import { StorageService } from './services/storage';
 import { SyncEngine } from './services/sync';
+import { AudioWarningService } from './services/audioWarnings';
 import { Network } from '@capacitor/network';
 import { MapContainer, TileLayer, CircleMarker, Popup, Marker, useMap, useMapEvents, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import 'leaflet.heat';
 import { supabase } from './lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import { NativeSettings, AndroidSettings } from 'capacitor-native-settings';
@@ -18,6 +20,7 @@ import { KeepAwake } from '@capacitor-community/keep-awake';
 import type { BackgroundGeolocationPlugin } from '@capacitor-community/background-geolocation';
 
 const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
+import GovernmentDashboard from './components/GovernmentDashboard';
 
 const CURRENT_APP_VERSION = "v1.1.0";
 
@@ -35,21 +38,21 @@ interface GripSensorPlugin {
 }
 const GripSensor = registerPlugin<GripSensorPlugin>('GripSensor');
 
-const blueDotIcon = new L.Icon({
+export const blueDotIcon = new L.Icon({
     iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
     iconSize: [32, 32],
     iconAnchor: [16, 32],
     popupAnchor: [0, -32]
 });
 
-const GOA_BOUNDS = {
+export const GOA_BOUNDS = {
     minLat: 14.8,
     maxLat: 15.9,
     minLng: 73.6,
     maxLng: 74.35
 };
 
-const isInGoa = (lat: number, lng: number) => (
+export const isInGoa = (lat: number, lng: number) => (
     Number.isFinite(lat) &&
     Number.isFinite(lng) &&
     lat >= GOA_BOUNDS.minLat &&
@@ -57,6 +60,155 @@ const isInGoa = (lat: number, lng: number) => (
     lng >= GOA_BOUNDS.minLng &&
     lng <= GOA_BOUNDS.maxLng
 );
+
+export const getConditionColor = (label: string) => {
+    switch (label) {
+        case 'POTHOLE': return '#dc2626';
+        case 'BAD': return '#ef4444';
+        case 'OBSTACLE': return '#a855f7';
+        case 'HUMP': return '#3b82f6';
+        case 'RUMBLE': return '#eab308';
+        case 'MINOR': return '#f59e0b';
+        case 'GOOD': default: return '#22c55e';
+    }
+};
+
+export function LiveMapUpdater({ position }: { position: { lat: number, lng: number } | null }) {
+    const map = useMap();
+    useEffect(() => { if (position) { map.flyTo([position.lat, position.lng], map.getZoom(), { animate: true, duration: 1.0 }); } }, [position, map]);
+    return null;
+}
+
+export function MapBoundsUpdater({ points }: { points: any[] }) {
+    const map = useMap();
+    useEffect(() => {
+        if (points.length > 0) {
+            const bounds = L.latLngBounds(
+                points
+                    .filter(p => isInGoa(Number(p.latitude), Number(p.longitude)))
+                    .map(p => [Number(p.latitude), Number(p.longitude)])
+            );
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+            }
+        }
+    }, [points, map]);
+    return null;
+}
+
+export function HeatmapLayer({ points }: { points: [number, number, number][] }) {
+    const map = useMap();
+
+    useEffect(() => {
+        console.log("HeatmapLayer: Rendering with", points?.length, "points");
+        if (!points || points.length === 0) return;
+        
+        // @ts-ignore - heatLayer is added by leaflet.heat
+        if (typeof L.heatLayer !== 'function') {
+            console.error("HeatmapLayer: L.heatLayer is not a function! leaflet.heat plugin might not be loaded correctly.");
+            return;
+        }
+
+        const heatLayer = (L as any).heatLayer(points, {
+            radius: 15, // Reduced radius for "stretch" look
+            blur: 10,
+            maxZoom: 17,
+            minOpacity: 0.4,
+            gradient: { 0.4: 'blue', 0.65: 'lime', 1: 'red' }
+        }).addTo(map);
+
+        return () => {
+            console.log("HeatmapLayer: Cleaning up");
+            map.removeLayer(heatLayer);
+        };
+    }, [map, points]);
+
+    return null;
+}
+
+export function DynamicMapLayers({ conditions, reports, showSensors, showReports, showHeatmap, getConditionColor }: any) {
+    const map = useMap();
+    const [zoom, setZoom] = useState(map.getZoom());
+
+    useMapEvents({
+        zoomend: () => setZoom(map.getZoom()),
+    });
+
+    const getRadius = (isBad: boolean) => {
+        if (zoom <= 11) return isBad ? 3 : 1;
+        if (zoom <= 13) return isBad ? 5 : 2;
+        if (zoom <= 15) return isBad ? 6 : 3;
+        return isBad ? 8 : 4;
+    };
+
+    const sortedConditions = useMemo(() => {
+        if (!conditions) return [];
+        const priority: Record<string, number> = { 'POTHOLE': 10, 'BAD': 9, 'OBSTACLE': 8, 'HUMP': 7, 'RUMBLE': 6, 'MINOR': 5, 'GOOD': 1 };
+        return [...conditions].sort((a, b) => {
+            const labelA = a.label || a.condition_label || '';
+            const labelB = b.label || b.condition_label || '';
+            const pa = priority[labelA] || 0;
+            const pb = priority[labelB] || 0;
+            return pa - pb;
+        });
+    }, [conditions]);
+
+    const heatmapData = useMemo(() => {
+        if (!showHeatmap) return [];
+        const data: [number, number, number][] = [];
+
+        // 1. Add Sensor Data (ONLY BAD labels for Heatmap)
+        if (conditions) {
+            conditions.forEach((pt: any) => {
+                const label = pt.label || pt.condition_label || '';
+                if (label === 'BAD' && isInGoa(Number(pt.latitude), Number(pt.longitude))) {
+                    // Use normalized intensity for BAD segments
+                    const intensity = Math.min(Number(pt.avg_rms || 0.8) / 1.5, 1.0); 
+                    data.push([Number(pt.latitude), Number(pt.longitude), intensity]);
+                }
+            });
+        }
+
+        return data;
+    }, [conditions, showHeatmap]);
+
+    return (
+        <>
+            {showHeatmap && <HeatmapLayer points={heatmapData} />}
+            {showSensors && sortedConditions.filter((pt: any) => {
+                const inGoa = isInGoa(Number(pt.latitude), Number(pt.longitude));
+                // Heatmap only takes 'BAD' segments, so we hide 'BAD' pins to show the heatmap instead
+                const label = pt.label || pt.condition_label || '';
+                if (showHeatmap && label === 'BAD') return false;
+                return inGoa;
+            }).map((pt: any, i: number) => {
+                const label = pt.label || pt.condition_label || '';
+                const ptColor = getConditionColor(label);
+                const isBad = label === 'POTHOLE' || label === 'BAD' || label === 'OBSTACLE' || label === 'HUMP';
+                return (
+                    <CircleMarker
+                        key={`cond-${i}`}
+                        center={[pt.latitude, pt.longitude]}
+                        radius={getRadius(isBad)}
+                        pathOptions={{
+                            color: isBad ? '#ffffff' : ptColor,
+                            fillColor: ptColor,
+                            fillOpacity: isBad ? 1.0 : (zoom < 14 ? 0.3 : 0.6),
+                            weight: isBad ? (zoom < 14 ? 1 : 2) : 0
+                        }}
+                    >
+                        <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: ptColor }}></div><span className="font-bold text-xs uppercase">{label}</span></div><p className="text-xs">Vibration: {pt.avg_rms?.toFixed(2)}</p></div></Popup>
+                    </CircleMarker>
+                );
+            })}
+            {showReports && reports.filter((rep: any) => isInGoa(Number(rep.latitude), Number(rep.longitude))).map((rep: any, i: number) => (
+                <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={zoom <= 12 ? 5 : 9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: zoom < 12 ? 1 : 2 }}>
+                    <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
+                </CircleMarker>
+            ))}
+        </>
+    );
+}
 
 function Home() {
     return (
@@ -66,18 +218,30 @@ function Home() {
                     <span className="text-4xl text-red-500"><img src="https://img.icons8.com/?size=100&id=102551&format=png&color=000000" alt="Shield" className="w-12 h-12" /></span>
                 </div>
                 <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">GRIP</h1>
-                <p className="text-white/80 mb-12 whitespace-pre-line text-lg">
+                <p className="text-white/80 mb-10 whitespace-pre-line text-lg">
                     Goa Real-time
                     Infrastructure Protection
                 </p>
-                <Link
-                    to="/login"
-                    className="flex items-center justify-center gap-2 w-full py-4 bg-white text-teal-600 font-bold rounded-full text-lg shadow-lg hover:bg-gray-50 transition-colors"
-                >
-                    <span className="w-4 h-4 rounded-full bg-teal-500 mr-2 inline-block animate-pulse"></span>
-                    Get Started
-                </Link>
-                <div className="mt-8 text-white/70 text-sm">
+                
+                <div className="space-y-4">
+                    <Link
+                        to="/login"
+                        className="flex items-center justify-center gap-2 w-full py-4 bg-white text-teal-600 font-bold rounded-full text-lg shadow-lg hover:bg-gray-50 transition-all active:scale-95"
+                    >
+                        <span className="w-4 h-4 rounded-full bg-teal-500 mr-2 inline-block animate-pulse"></span>
+                        Citizen Portal
+                    </Link>
+
+                    <Link
+                        to="/gov-login"
+                        className="flex items-center justify-center gap-2 w-full py-4 bg-blue-900/40 text-white font-bold rounded-full text-lg shadow-lg border border-white/20 hover:bg-blue-900/60 transition-all active:scale-95"
+                    >
+                        <span>🏛️</span>
+                        Government Access
+                    </Link>
+                </div>
+
+                <div className="mt-10 text-white/70 text-sm">
                     <p>Protecting Goa's Infrastructure in Real Time</p>
                     <p className="mt-2 text-xs">🛣️ Roads • 🌴 Trees • 🌊 Coastline</p>
                 </div>
@@ -85,6 +249,130 @@ function Home() {
         </div>
     );
 }
+
+function GovLogin() {
+    const navigate = useNavigate();
+    const [securityCode, setSecurityCode] = useState('');
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [errorMsg, setErrorMsg] = useState('');
+    const [step, setStep] = useState(1); // 1: Security Code, 2: Auth
+
+    const handleNext = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (securityCode === '0000') {
+            setStep(2);
+            setErrorMsg('');
+        } else {
+            setErrorMsg('Invalid Security Code. Access Denied.');
+        }
+    };
+
+    const handleAuth = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+        setErrorMsg('');
+
+        try {
+            const { error } = await supabase.auth.signInWithPassword({ email, password });
+            if (error) throw error;
+            localStorage.setItem('user_mode', 'government');
+            window.dispatchEvent(new Event('auth-change'));
+            navigate('/gov-dashboard');
+        } catch (error: any) {
+            setErrorMsg(error.message || 'Authentication failed');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="flex flex-col items-center justify-center min-h-screen p-4 bg-slate-900">
+            <div className="w-full max-w-md p-8 bg-white dark:bg-zinc-800 rounded-3xl shadow-2xl relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-2 bg-blue-600"></div>
+                
+                <div className="mb-8 text-center">
+                    <div className="mx-auto w-16 h-16 bg-blue-50 dark:bg-blue-900/30 rounded-full flex items-center justify-center mb-4">
+                        <span className="text-2xl">🏛️</span>
+                    </div>
+                    <h2 className="text-3xl font-bold text-gray-900 dark:text-white">Gov Portal</h2>
+                    <p className="text-gray-500 dark:text-gray-400">Secure Government Access</p>
+                </div>
+
+                {errorMsg && (
+                    <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm font-bold flex items-center gap-2">
+                        <span>⚠️</span> {errorMsg}
+                    </div>
+                )}
+
+                {step === 1 ? (
+                    <form onSubmit={handleNext} className="space-y-6">
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2 uppercase tracking-wider">Departmental Security Code</label>
+                            <input
+                                type="password"
+                                value={securityCode}
+                                onChange={e => setSecurityCode(e.target.value)}
+                                placeholder="••••"
+                                className="w-full px-6 py-4 rounded-2xl bg-gray-100 dark:bg-zinc-700 border-2 border-transparent focus:border-blue-500 outline-none transition-all text-center text-3xl tracking-[1em] font-mono dark:text-white"
+                                required
+                                autoFocus
+                            />
+                        </div>
+                        <button
+                            type="submit"
+                            className="w-full py-4 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700 transition-all active:scale-95"
+                        >
+                            Verify Credentials
+                        </button>
+                    </form>
+                ) : (
+                    <form onSubmit={handleAuth} className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Official Email</label>
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={e => setEmail(e.target.value)}
+                                placeholder="admin@goa.gov.in"
+                                className="w-full px-4 py-3 rounded-xl bg-gray-100 dark:bg-zinc-700 border border-transparent focus:border-blue-500 outline-none transition-all dark:text-white font-medium"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Password</label>
+                            <input
+                                type="password"
+                                value={password}
+                                onChange={e => setPassword(e.target.value)}
+                                placeholder="••••••••"
+                                className="w-full px-4 py-3 rounded-xl bg-gray-100 dark:bg-zinc-700 border border-transparent focus:border-blue-500 outline-none transition-all dark:text-white font-medium"
+                                required
+                            />
+                        </div>
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="w-full mt-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-700 text-white font-black rounded-2xl shadow-lg hover:opacity-90 transition-all active:scale-95 disabled:opacity-50"
+                        >
+                            {loading ? 'Authenticating...' : 'Complete Login'}
+                        </button>
+                        <button 
+                            type="button" 
+                            onClick={() => setStep(1)}
+                            className="w-full text-sm text-gray-500 font-bold hover:text-gray-700 dark:hover:text-gray-300 pt-2"
+                        >
+                            ← Back to Security Code
+                        </button>
+                    </form>
+                )}
+            </div>
+            <Link to="/" className="mt-8 text-white/50 text-sm font-bold hover:text-white">← Return to Public Portal</Link>
+        </div>
+    );
+}
+
 
 function Login() {
     const navigate = useNavigate();
@@ -110,6 +398,8 @@ function Login() {
             } else {
                 const { error } = await supabase.auth.signInWithPassword({ email, password });
                 if (error) throw error;
+                localStorage.removeItem('user_mode');
+                window.dispatchEvent(new Event('auth-change'));
                 navigate('/dashboard');
             }
         } catch (error: any) {
@@ -193,6 +483,16 @@ function Login() {
                     <div className="text-center pt-2 text-xs text-gray-500">
                         GRIP — Goa Real-time Infrastructure Protection
                     </div>
+
+                    <div className="mt-8 pt-6 border-t border-gray-100 dark:border-zinc-700 text-center">
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Administrative Access</p>
+                        <Link 
+                            to="/gov-login" 
+                            className="inline-flex items-center gap-2 px-6 py-3 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-2xl text-sm font-black hover:bg-blue-100 transition-all"
+                        >
+                            🏛️ Government Portal
+                        </Link>
+                    </div>
                 </form>
             </div>
         </div>
@@ -250,12 +550,133 @@ function WelcomeGuidance({ onComplete }: { onComplete: () => void }) {
     );
 }
 
+function GuideMe() {
+    const navigate = useNavigate();
+    const [isActive, setIsActive] = useState(false);
+    const [segments, setSegments] = useState<any[]>([]);
+    const [loc, setLoc] = useState<{ lat: number, lng: number } | null>(null);
+    const geoWatchId = useRef<string | null>(null);
+
+    useEffect(() => {
+        const fetchMap = async () => {
+            let all: any[] = [];
+            let from = 0;
+            const PAGE_SIZE = 1000;
+            while (from < 50000) {
+                const { data } = await supabase.from('road_segments').select('*')
+                    .gte('latitude', GOA_BOUNDS.minLat).lte('latitude', GOA_BOUNDS.maxLat)
+                    .gte('longitude', GOA_BOUNDS.minLng).lte('longitude', GOA_BOUNDS.maxLng)
+                    .range(from, from + PAGE_SIZE - 1);
+                if (!data || data.length === 0) break;
+                all = [...all, ...data];
+                if (data.length < PAGE_SIZE) break;
+                from += PAGE_SIZE;
+            }
+            setSegments(all);
+        };
+        fetchMap();
+        return () => { stopGuide(); };
+    }, []);
+
+    const startGuide = async () => {
+        setIsActive(true);
+        try {
+            const audio = new Audio('/audio/activated.mp3');
+            audio.play().catch(e => console.error("Could not play init sound:", e));
+        } catch (e) { }
+
+        try {
+            const watcherId = await BackgroundGeolocation.addWatcher({
+                backgroundMessage: "Scanning for road hazards",
+                backgroundTitle: "GRIP Audio Guide",
+                requestPermissions: true,
+                stale: false,
+                distanceFilter: 0
+            }, (position) => {
+                if (position) {
+                    setLoc({ lat: position.latitude, lng: position.longitude });
+                    // Pass speed (m/s) and bearing (degrees) to the advanced proximity engine
+                    AudioWarningService.checkProximity(
+                        position.latitude,
+                        position.longitude,
+                        position.speed,
+                        position.bearing,
+                        segments
+                    );
+                }
+            });
+            geoWatchId.current = watcherId;
+        } catch (e) {
+            console.error("GPS Watcher error", e);
+            alert("Could not start GPS tracking.");
+            setIsActive(false);
+        }
+    };
+
+    const stopGuide = async () => {
+        setIsActive(false);
+        if (geoWatchId.current) {
+            await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
+            geoWatchId.current = null;
+        }
+    };
+
+    return (
+        <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 flex flex-col">
+            <div className="bg-gradient-to-r from-purple-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4 shadow-md z-10">
+                <button onClick={() => { stopGuide(); navigate(-1); }} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ArrowLeft className="w-6 h-6" /></button>
+                <h1 className="text-xl font-bold">Audio Guide Mode</h1>
+            </div>
+
+            <div className="flex-1 relative">
+                <div className="absolute inset-0 z-0">
+                    <MapContainer center={loc ? [loc.lat, loc.lng] : [15.4909, 73.8278]} zoom={16} className="w-full h-full" zoomControl={false} attributionControl={false}>
+                        <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
+                        <DynamicMapLayers
+                            conditions={segments}
+                            reports={[]}
+                            showSensors={true}
+                            showReports={false}
+                            getConditionColor={(label: string) => {
+                                switch (label) {
+                                    case 'POTHOLE': return '#dc2626';
+                                    case 'BAD': return '#ef4444';
+                                    case 'OBSTACLE': return '#a855f7';
+                                    case 'HUMP': return '#3b82f6';
+                                    case 'RUMBLE': return '#eab308';
+                                    case 'MINOR': return '#f59e0b';
+                                    case 'GOOD': default: return '#22c55e';
+                                }
+                            }}
+                        />
+                        {loc && <Marker position={[loc.lat, loc.lng]} icon={blueDotIcon} />}
+                        <LiveMapUpdater position={loc} />
+                    </MapContainer>
+                </div>
+
+                <div className="absolute bottom-8 left-4 right-4 z-10 flex flex-col gap-4">
+                    <div className="bg-white/95 dark:bg-zinc-800/95 p-4 rounded-2xl shadow-xl backdrop-blur text-center pointer-events-auto">
+                        <h2 className="text-lg font-bold mb-1 dark:text-white">Hazard Alerts</h2>
+                        <p className="text-xs text-gray-500 mb-4">Drive safely. You'll hear a warning if you approach a known pothole or bad road.</p>
+
+                        <button onClick={isActive ? stopGuide : startGuide} className={`w-full py-4 text-white font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95 ${isActive ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                            {isActive ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                            {isActive ? "Stop Guide" : "Start Audio Guide"}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function Dashboard() {
     const navigate = useNavigate();
     const [isOnline, setIsOnline] = useState(true);
     const [pendingSyncs, setPendingSyncs] = useState(0);
     const [showGuidance, setShowGuidance] = useState(false);
     const [userName, setUserName] = useState('Citizen');
+    const [realStats, setRealStats] = useState({ reported: 0, active: 0, resolved: 0 });
 
     useEffect(() => {
         SyncEngine.start();
@@ -289,7 +710,20 @@ function Dashboard() {
                 }
             });
         }
-        const interval = setInterval(updateStatus, 3000);
+        const fetchRealStats = async () => {
+            try {
+                const { data, error } = await supabase.from('reports').select('status');
+                if (!error && data) {
+                    const reported = data.length;
+                    const active = data.filter(r => r.status?.toLowerCase() === 'dispatched' || r.status?.toLowerCase() === 'pending').length;
+                    const resolved = data.filter(r => r.status?.toLowerCase() === 'resolved' || r.status?.toLowerCase() === 'completed').length;
+                    setRealStats({ reported, active, resolved });
+                }
+            } catch (e) { console.error("Stats fetch failed:", e); }
+        };
+
+        fetchRealStats();
+        const interval = setInterval(() => { updateStatus(); fetchRealStats(); }, 10000);
         return () => clearInterval(interval);
     }, []);
 
@@ -302,6 +736,8 @@ function Dashboard() {
 
     const handleSignOut = async () => {
         await supabase.auth.signOut();
+        localStorage.removeItem('user_mode');
+        window.dispatchEvent(new Event('auth-change'));
         navigate('/login');
     };
 
@@ -350,10 +786,18 @@ function Dashboard() {
                     <button onClick={() => navigate('/report/pothole')} className="w-full bg-white dark:bg-zinc-800 p-5 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center gap-4 hover:shadow-md transition-all text-left">
                         <div className="w-14 h-14 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center flex-shrink-0"><Activity className="w-7 h-7" /></div>
                         <div className="flex-1">
-                            <h3 className="font-bold text-lg text-gray-900 dark:text-white">Pothole Detection</h3>
+                            <h3 className="font-bold text-lg text-gray-900 dark:text-white">Road Quality Detection</h3>
                             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 leading-snug">Auto-detect road irregularities using sensors</p>
                         </div>
                         <ArrowRight className="w-5 h-5 text-blue-500" />
+                    </button>
+                    <button onClick={() => navigate('/guide')} className="w-full bg-white dark:bg-zinc-800 p-5 rounded-2xl shadow-sm border border-gray-100 dark:border-zinc-700 flex items-center gap-4 hover:shadow-md transition-all text-left">
+                        <div className="w-14 h-14 rounded-xl bg-purple-100 text-purple-600 flex items-center justify-center flex-shrink-0"><Volume2 className="w-7 h-7" /></div>
+                        <div className="flex-1">
+                            <h3 className="font-bold text-lg text-gray-900 dark:text-white">Audio Guide</h3>
+                            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 leading-snug">Get voice alerts for potholes and hazards without recording data</p>
+                        </div>
+                        <ArrowRight className="w-5 h-5 text-purple-500" />
                     </button>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
@@ -367,13 +811,22 @@ function Dashboard() {
                     </button>
                 </div>
                 <div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700 mt-8">
-                    <h3 className="font-bold text-gray-900 dark:text-white mb-6 text-lg">Quick Stats</h3>
+                    <h3 className="font-bold text-gray-900 dark:text-white mb-6 text-lg">Your Impact</h3>
                     <div className="flex justify-between text-center px-2">
-                        <div><p className="text-3xl font-bold text-green-500 mb-1">12</p><p className="text-xs font-semibold text-gray-500">Reported</p></div>
-                        <div className="w-px bg-gray-200 dark:bg-zinc-700"></div>
-                        <div><p className="text-3xl font-bold text-blue-500 mb-1">5</p><p className="text-xs font-semibold text-gray-500">In Progress</p></div>
-                        <div className="w-px bg-gray-200 dark:bg-zinc-700"></div>
-                        <div><p className="text-3xl font-bold text-gray-800 dark:text-gray-300 mb-1">8</p><p className="text-xs font-semibold text-gray-500">Resolved</p></div>
+                        <div onClick={() => navigate('/history')} className="cursor-pointer active:scale-95 transition-transform">
+                            <p className="text-3xl font-black text-emerald-500 mb-1">{realStats.reported}</p>
+                            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Reported</p>
+                        </div>
+                        <div className="w-px bg-gray-100 dark:bg-zinc-700"></div>
+                        <div onClick={() => navigate('/history')} className="cursor-pointer active:scale-95 transition-transform">
+                            <p className="text-3xl font-black text-blue-500 mb-1">{realStats.active}</p>
+                            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Active</p>
+                        </div>
+                        <div className="w-px bg-gray-100 dark:bg-zinc-700"></div>
+                        <div onClick={() => navigate('/history')} className="cursor-pointer active:scale-95 transition-transform">
+                            <p className="text-3xl font-black text-slate-800 dark:text-slate-300 mb-1">{realStats.resolved}</p>
+                            <p className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Resolved</p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -389,27 +842,27 @@ function ReportGarbage() {
     const [savedMessage, setSavedMessage] = useState('');
 
     const takePicture = async () => {
-    try {
-        const image = await CapCamera.getPhoto({ 
-            quality: 60, 
-            width: 1280, 
-            height: 720, 
-            allowEditing: false, 
-            // 1. Change the result type to return raw Base64 data instead of a temporary URI
-            resultType: CameraResultType.Base64, 
-            source: CameraSource.Camera 
-        });
-        
-        if (image.base64String) {
-            // 2. Format it into a standard data URL so the SyncEngine can fetch() it easily
-            const base64DataUrl = `data:image/jpeg;base64,${image.base64String}`;
-            setImageUri(base64DataUrl);
-            fetchLocation();
+        try {
+            const image = await CapCamera.getPhoto({
+                quality: 60,
+                width: 1280,
+                height: 720,
+                allowEditing: false,
+                // 1. Change the result type to return raw Base64 data instead of a temporary URI
+                resultType: CameraResultType.Base64,
+                source: CameraSource.Camera
+            });
+
+            if (image.base64String) {
+                // 2. Format it into a standard data URL so the SyncEngine can fetch() it easily
+                const base64DataUrl = `data:image/jpeg;base64,${image.base64String}`;
+                setImageUri(base64DataUrl);
+                fetchLocation();
+            }
+        } catch (e) {
+            console.error("Camera error:", e);
         }
-    } catch (e) { 
-        console.error("Camera error:", e); 
-    }
-};
+    };
 
     const fetchLocation = async () => {
         const isWeb = Capacitor.getPlatform() === 'web';
@@ -428,12 +881,12 @@ function ReportGarbage() {
 
     const handleSave = async () => {
         if (!imageUri || !loc) return;
-        
+
         if (!isInGoa(loc.lat, loc.lng)) {
             alert("This platform only accepts reports within Goa. Please do not submit data from outside the region.");
             return;
         }
-        
+
         setIsSaving(true);
         try {
             await StorageService.saveIssue({ imageUri, lat: loc.lat, lng: loc.lng, timestamp: Date.now(), type: 'auto' });
@@ -485,63 +938,6 @@ function ReportGarbage() {
     )
 }
 
-function LiveMapUpdater({ position }: { position: { lat: number, lng: number } | null }) {
-    const map = useMap();
-    useEffect(() => { if (position) { map.flyTo([position.lat, position.lng], map.getZoom(), { animate: true, duration: 1.0 }); } }, [position, map]);
-    return null;
-}
-
-function MapBoundsUpdater({ points }: { points: any[] }) {
-    const map = useMap();
-    useEffect(() => {
-        if (points.length > 0) {
-            const bounds = L.latLngBounds(
-                points
-                    .filter(p => isInGoa(Number(p.latitude), Number(p.longitude)))
-                    .map(p => [Number(p.latitude), Number(p.longitude)])
-            );
-            if (bounds.isValid()) {
-                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
-            }
-        }
-    }, [points, map]);
-    return null;
-}
-
-function DynamicMapLayers({ conditions, reports, showSensors, showReports, getConditionColor }: any) {
-    const map = useMap();
-    const [zoom, setZoom] = useState(map.getZoom());
-
-    useMapEvents({
-        zoomend: () => setZoom(map.getZoom()),
-    });
-
-    const getRadius = (isBad: boolean) => {
-        if (zoom <= 11) return isBad ? 3 : 1;
-        if (zoom <= 13) return isBad ? 5 : 2;
-        if (zoom <= 15) return isBad ? 6 : 3;
-        return isBad ? 8 : 5;
-    };
-
-    return (
-        <>
-            {showSensors && conditions.filter((pt: any) => isInGoa(Number(pt.latitude), Number(pt.longitude))).map((pt: any, i: number) => {
-                const ptColor = getConditionColor(pt.condition_label);
-                const isBad = pt.condition_label === 'POTHOLE' || pt.condition_label === 'BAD';
-                return (
-                    <CircleMarker key={`cond-${i}`} center={[pt.latitude, pt.longitude]} radius={getRadius(isBad)} pathOptions={{ color: ptColor, fillColor: ptColor, fillOpacity: zoom < 12 ? 0.9 : 0.8, weight: zoom < 12 ? 0 : 2 }} >
-                        <Popup><div className="p-1 min-w-[140px]"><div className="flex items-center gap-2 mb-2"><div className="w-3 h-3 rounded-full" style={{ backgroundColor: ptColor }}></div><span className="font-bold text-xs uppercase">{pt.condition_label}</span></div><p className="text-xs">Vibration: {pt.avg_rms?.toFixed(2)}</p></div></Popup>
-                    </CircleMarker>
-                );
-            })}
-            {showReports && reports.filter((rep: any) => isInGoa(Number(rep.latitude), Number(rep.longitude))).map((rep: any, i: number) => (
-                <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={zoom <= 12 ? 5 : 9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: zoom < 12 ? 1 : 2 }}>
-                    <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
-                </CircleMarker>
-            ))}
-        </>
-    );
-}
 
 function PotholeDetection() {
     const navigate = useNavigate();
@@ -618,11 +1014,11 @@ function PotholeDetection() {
                     const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
                     const normalizedReadings = stats.readings.map((r: any) => {
                         const hasNativeGps = r.lat !== 0 && r.lat !== undefined;
-                        return { 
-                            ...r, 
-                            lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat), 
-                            lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng), 
-                            session_id: sessionRef.current 
+                        return {
+                            ...r,
+                            lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat),
+                            lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng),
+                            session_id: sessionRef.current
                         };
                     });
 
@@ -730,14 +1126,14 @@ function PotholeDetection() {
                 const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
                 const normalizedReadings = result.readings.map((r: any) => {
                     const hasNativeGps = r.lat !== 0 && r.lat !== undefined;
-                    return { 
-                        ...r, 
-                        lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat), 
-                        lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng), 
-                        session_id: sessionRef.current 
+                    return {
+                        ...r,
+                        lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat),
+                        lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng),
+                        session_id: sessionRef.current
                     };
                 });
-                
+
                 batchRef.current = [...batchRef.current, ...normalizedReadings];
                 totalSamplesRef.current += normalizedReadings.length;
                 setSampleCount(totalSamplesRef.current);
@@ -751,7 +1147,7 @@ function PotholeDetection() {
     };
 
     const saveSession = async () => {
-        setShowSavePrompt(false); 
+        setShowSavePrompt(false);
         setUploadStatus('saving');
         if (batchRef.current.length > 0) {
             await StorageService.saveSensorBatch({ readings: batchRef.current });
@@ -935,17 +1331,6 @@ function MapViewer() {
 
     useEffect(() => { fetchMapLayer(); }, []);
 
-    const getConditionColor = (label: string) => {
-        switch (label) {
-            case 'POTHOLE': return '#dc2626';
-            case 'BAD': return '#ef4444';
-            case 'HUMP': return '#3b82f6';
-            case 'RUMBLE': return '#eab308';
-            case 'MINOR': return '#f59e0b';
-            case 'GOOD': default: return '#22c55e';
-        }
-    };
-
     return (
         <div className="h-screen flex flex-col bg-zinc-900 relative">
             <div className="absolute top-0 w-full z-50 bg-gradient-to-b from-black/80 to-transparent p-4 pt-12 text-white flex justify-between items-start pointer-events-none">
@@ -968,12 +1353,12 @@ function MapViewer() {
                 <div className="flex-1 z-0 relative">
                     <MapContainer center={[15.4909, 73.8278]} zoom={11} className="w-full h-full" zoomControl={false}>
                         <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
-                        <DynamicMapLayers 
-                            conditions={conditions} 
-                            reports={reports} 
-                            showSensors={showSensors} 
-                            showReports={showReports} 
-                            getConditionColor={getConditionColor} 
+                        <DynamicMapLayers
+                            conditions={conditions}
+                            reports={reports}
+                            showSensors={showSensors}
+                            showReports={showReports}
+                            getConditionColor={getConditionColor}
                         />
                         <LocateControl />
                         <MapBoundsUpdater points={conditions.length > 0 ? conditions : reports} />
@@ -988,6 +1373,7 @@ function MapViewer() {
                     <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] bg-white/95 dark:bg-zinc-800/95 px-5 py-3 rounded-full shadow-xl flex gap-4 text-[10px] font-bold text-gray-700 pointer-events-auto">
                         <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#dc2626' }}></div> Pothole</div>
                         <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#ef4444' }}></div> Bad</div>
+                        <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#a855f7' }}></div> Obstacle</div>
                         <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#3b82f6' }}></div> Hump</div>
                         <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: '#22c55e' }}></div> Good</div>
                     </div>
@@ -1073,6 +1459,7 @@ function App() {
     const [loading, setLoading] = useState(true);
     const [needsUpdate, setNeedsUpdate] = useState(false);
     const [updateUrl, setUpdateUrl] = useState("");
+    const [userMode, setUserMode] = useState<string | null>(localStorage.getItem('user_mode'));
 
     useEffect(() => {
         // Check for updates
@@ -1094,21 +1481,43 @@ function App() {
         checkUpdate();
 
         supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false); });
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session));
-        return () => subscription.unsubscribe();
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+            setSession(session);
+            if (session) {
+                localStorage.removeItem('user_mode');
+                setUserMode(null);
+            }
+        });
+
+        // Listen for custom "auth-change" event for bypass login
+        const handleBypassAuth = () => {
+            setUserMode(localStorage.getItem('user_mode'));
+        };
+        window.addEventListener('auth-change', handleBypassAuth);
+
+        return () => {
+            subscription.unsubscribe();
+            window.removeEventListener('auth-change', handleBypassAuth);
+        };
     }, []);
 
     if (needsUpdate) return <ForcedUpdateModal updateUrl={updateUrl} />;
     if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-zinc-900"><div className="animate-spin rounded-full h-8 w-8 border-4 border-green-500 border-t-transparent"></div></div>;
+
     return (
         <Router>
             <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 font-sans antialiased text-gray-900 dark:text-gray-100">
                 <Routes>
-                    <Route path="/" element={!session ? <Home /> : <Navigate to="/dashboard" />} />
+                    <Route path="/" element={(!session && userMode !== 'government') ? <Home /> : (userMode === 'government' ? <Navigate to="/gov-dashboard" /> : <Navigate to="/dashboard" />)} />
                     <Route path="/login" element={!session ? <Login /> : <Navigate to="/dashboard" />} />
+                    <Route path="/gov-login" element={(userMode !== 'government' && !session) ? <GovLogin /> : <Navigate to="/gov-dashboard" />} />
+                    
                     <Route path="/dashboard" element={session ? <Dashboard /> : <Navigate to="/login" />} />
+                    <Route path="/gov-dashboard" element={session ? <GovernmentDashboard /> : <Navigate to="/gov-login" />} />
+                    
                     <Route path="/report/garbage" element={session ? <ReportGarbage /> : <Navigate to="/login" />} />
                     <Route path="/report/pothole" element={session ? <PotholeDetection /> : <Navigate to="/login" />} />
+                    <Route path="/guide" element={session ? <GuideMe /> : <Navigate to="/login" />} />
                     <Route path="/map" element={session ? <MapViewer /> : <Navigate to="/login" />} />
                     <Route path="/history" element={session ? <HistoryFeed /> : <Navigate to="/login" />} />
                 </Routes>

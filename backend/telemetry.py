@@ -192,12 +192,14 @@ def get_vertical_accel(df_win, axis_mode='auto', default_fs=100.0):
     return np.zeros(len(df_win), dtype=float)
 
 
-def vertical_from_gyro_and_accel(df_win, time_col='time_s', accel_cols=('accel_x','accel_y','accel_z'), gyro_cols=('gyro_x','gyro_y','gyro_z'), accel_correction=0.02, fs_default=100.0):
+def vertical_from_gyro_and_accel(df_win, time_col='time_s', accel_cols=('accel_x','accel_y','accel_z'), gyro_cols=('gyro_x','gyro_y','gyro_z'), accel_correction=0.02, fs_default=100.0, return_all=False):
     """Estimate gravity axis using a simple complementary-style filter (gyro integration + accel correction)
     and return the vertical linear acceleration (gravity removed, signed downward negative).
     This is a lightweight approach that works well when gyro is present.
     """
     if not set(accel_cols).issubset(df_win.columns):
+        if return_all:
+            return get_vertical_accel(df_win, axis_mode='auto', default_fs=fs_default), np.zeros(len(df_win)), np.zeros(len(df_win)), np.zeros(len(df_win)), np.zeros(len(df_win))
         return get_vertical_accel(df_win, axis_mode='auto', default_fs=fs_default)
     ax = df_win[accel_cols[0]].astype(float).to_numpy()
     ay = df_win[accel_cols[1]].astype(float).to_numpy()
@@ -217,6 +219,11 @@ def vertical_from_gyro_and_accel(df_win, time_col='time_s', accel_cols=('accel_x
     # initial gravity estimate from first accel sample
     g_vec = np.array([ax[0], ay[0], az[0]], dtype=float)
     out_vertical = np.zeros_like(ax)
+    out_hx = np.zeros_like(ax)
+    out_hy = np.zeros_like(ax)
+    out_hz = np.zeros_like(ax)
+    out_yaw_rate = np.zeros_like(ax)
+    
     for i in range(len(ax)):
         acc_vec = np.array([ax[i], ay[i], az[i]], dtype=float)
         if has_gyro:
@@ -234,6 +241,17 @@ def vertical_from_gyro_and_accel(df_win, time_col='time_s', accel_cols=('accel_x
         # vertical acceleration: projection of linear accel onto gravity axis, negate so downward is negative
         vert = -float(np.dot(linear, g_unit))
         out_vertical[i] = vert
+        
+        if return_all:
+            horiz = linear - np.dot(linear, g_unit) * g_unit
+            out_hx[i] = horiz[0]
+            out_hy[i] = horiz[1]
+            out_hz[i] = horiz[2]
+            if has_gyro:
+                out_yaw_rate[i] = float(np.dot(omega, g_unit))
+                
+    if return_all:
+        return out_vertical, out_hx, out_hy, out_hz, out_yaw_rate
     return out_vertical
 
 
@@ -288,13 +306,11 @@ def classify_dataframe(
                 pass
     df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
     df = df.dropna(subset=['timestamp']).reset_index(drop=True)
-    tms = df['timestamp'].astype(float).values
-    t0 = tms[0]
-    times_s = (tms - t0) / 1000.0
-    df['time_s'] = times_s
-    # Expect timestamp in ms; accel_x/y/z; latitude, longitude
-    if 'timestamp' not in df.columns:
-        raise ValueError('input CSV must have timestamp column')
+    
+    if len(df) == 0:
+        print('no valid samples after timestamp drop')
+        return [], df
+
     tms = df['timestamp'].astype(float).values
     t0 = tms[0]
     times_s = (tms - t0) / 1000.0
@@ -304,7 +320,7 @@ def classify_dataframe(
     dts = np.diff(times_s)
     if len(dts) == 0:
         print('no samples')
-        return
+        return [], df
     median_dt = float(np.median(dts))
     sample_rate = 1.0 / median_dt if median_dt > 0 else 100.0
 
@@ -389,9 +405,9 @@ def classify_dataframe(
                 local_dt = float(np.median(pos_dts))
             else:
                 # fallback: estimate dt from window length assuming ~1s windows
-                local_dt = (1.0 / float(samples)) if samples > 0 else (median_dt if median_dt > 0 else 0.01)
+                local_dt = median_dt if median_dt > 0 else 0.01
         else:
-            local_dt = median_dt if median_dt > 0 else (1.0 / float(samples) if samples > 0 else 0.01)
+            local_dt = median_dt if median_dt > 0 else 0.01
 
         # apply high-pass to accelerometer per-axis
         xf = apply_highpass(ax, dt=local_dt, fc=1.0)
@@ -401,9 +417,11 @@ def classify_dataframe(
         # compute vertical component according to axis_mode
         try:
             if axis_mode in ('gyro', 'projected'):
-                v_raw = vertical_from_gyro_and_accel(win, time_col='time_s')
+                v_raw, hx_raw, hy_raw, hz_raw, yaw_rate = vertical_from_gyro_and_accel(win, time_col='time_s', return_all=True)
             else:
                 v_raw = get_vertical_accel(win, axis_mode=axis_mode)
+                hx_raw, hy_raw, hz_raw = ax, ay, np.zeros(samples)
+                yaw_rate = win['gyro_z'].astype(float).values if 'gyro_z' in win.columns else np.zeros(samples)
             # coerce to 1-D numeric numpy array and ensure length matches
             v_raw = np.array(v_raw, dtype=float, copy=False)
             v_raw = np.atleast_1d(v_raw)
@@ -411,6 +429,8 @@ def classify_dataframe(
                 v_raw = np.resize(v_raw, samples)
         except Exception:
             v_raw = zf.copy()
+            hx_raw, hy_raw, hz_raw = ax, ay, np.zeros(samples)
+            yaw_rate = win['gyro_z'].astype(float).values if 'gyro_z' in win.columns else np.zeros(samples)
 
         # high-pass the vertical signal as well to focus on transient
         try:
@@ -441,8 +461,21 @@ def classify_dataframe(
             vibration = compute_vibration_rms(xf, yf, zf)
             
         # Compute lateral variance (measure of horizontal shaking/swerving)
-        # Using variance of high-passed x and y axes.
-        lateral_variance = float(np.var(xf) + np.var(yf))
+        # Using variance of true 3D horizontal high-passed acceleration.
+        try:
+            hxf = apply_highpass(np.array(hx_raw, dtype=float), dt=local_dt, fc=1.0)
+            hyf = apply_highpass(np.array(hy_raw, dtype=float), dt=local_dt, fc=1.0)
+            hzf = apply_highpass(np.array(hz_raw, dtype=float), dt=local_dt, fc=1.0)
+            lateral_variance = float(np.var(hxf) + np.var(hyf) + np.var(hzf))
+        except Exception:
+            lateral_variance = float(np.var(xf) + np.var(yf))
+        
+        # SWERVE VS TURN FIX: Suppress lateral_variance if it's a sustained turn
+        # A swerve has net heading change near 0. A turn has a large net heading change.
+        if len(yaw_rate) > 0:
+            heading_change = float(np.abs(np.sum(yaw_rate) * local_dt))
+            if heading_change > 0.25: # >14 degrees net change in 1s = turn/roundabout
+                lateral_variance *= 0.1
         
         anomaly = compute_anomaly_score(vibration, rb)
         # only push valid windows into buffer
@@ -467,8 +500,8 @@ def classify_dataframe(
         # measure contiguous elevated durations
         elevated_durations = []
         cur_len = 0
-        for v in elevated_mask:
-            if v:
+        for is_elev in elevated_mask:
+            if is_elev:
                 cur_len += 1
             else:
                 if cur_len > 0:
@@ -551,7 +584,7 @@ def classify_dataframe(
             hump = True
         # Force hump if raw acceleration magnitude peaks above hump_mag_thresh (e.g., 20 m/s^2)
         try:
-            if peak_raw_mag >= float(hump_mag_thresh):
+            if peak_raw_mag >= float(hump_mag_thresh) and window_valid:
                 hump = True
         except Exception:
             pass
@@ -604,7 +637,11 @@ def classify_dataframe(
             else:
                 nl, nm, nh = 0.0,0.0,0.0
             # Heuristic mapping: high mid-band content and higher vibration => rough
-            if vibration < max(0.20, minor_thresh*0.8):
+            if label in ('POTHOLE', 'BAD'):
+                road_grade = 'ROUGH'
+            elif label == 'HUMP':
+                road_grade = 'MODERATE'
+            elif vibration < max(0.20, minor_thresh*0.8):
                 road_grade = 'SMOOTH'
             elif (nm > 0.45 and vibration >= bad_thresh*0.8) or vibration >= bad_thresh*1.2:
                 road_grade = 'ROUGH'
@@ -619,9 +656,9 @@ def classify_dataframe(
 
         # pick session id from data if available
         session_id = ''
-        if 'session_id' in df.columns:
+        if 'session_id' in win.columns:
             try:
-                session_id = str(df['session_id'].iloc[0])
+                session_id = str(win['session_id'].iloc[0])
             except Exception:
                 session_id = ''
 

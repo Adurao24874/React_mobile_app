@@ -35,6 +35,16 @@ The GRIP system uses a hybrid processing model where data is collected on the ed
 *   **Processing**: `backend/worker.py` detects pending reports and runs local **YOLO AI models** (`garbage.pt`, `pothole.pt`).
 *   **Classification**: High-confidence detections are labeled (e.g., "Plastic Waste", "Deep Pothole") and stored in the `reports` table.
 
+### 3. n8n Automation Architecture (Central Routing Brain)
+The GRIP ecosystem uses **n8n** to handle complex back-office automation and geo-spatial logic that goes beyond simple API calls:
+
+*   **Geo-Spatial Routing**: When a citizen submits a report, n8n triggers an automated workflow that takes the GPS coordinates and performs a "Point-in-Polygon" check against the **goa_villages** GeoJSON dataset.
+*   **Automatic Jurisdictional Assignment**: 
+    *   If the issue is in **Pernem**, n8n automatically assigns the ticket to the **PWD Division Pernem**.
+    *   If the issue is classified as **"Waste"**, n8n routes it to the specific **Village Panchayat** responsible for that area.
+*   **SLA & Escalation Monitoring**: n8n tracks every ticket's lifecycle. If a critical hazard is not resolved within **48 hours**, n8n triggers an escalation status, notifying higher-level officials on the Government Dashboard.
+*   **Unified Start-Up**: The `start_grip.bat` script automatically bootstraps the n8n instance alongside the backend and frontend servers for a seamless local development experience.
+
 ## Tasks Performed During Initialization
 
 1.  **Repository Setup:** Initialized a local Git repository for the project.

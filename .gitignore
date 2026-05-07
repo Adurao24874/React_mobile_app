@@ -50,3 +50,13 @@ build/
 out/
 backend/temp_worker_img.jpg
 *.pt
+
+# Junk and Temp
+*.lnk
+backend/tmp_sensors*.json
+backend/sample_payload.json
+grip/android/.gradle_cache/
+grip/android/build_log_*.txt
+grip/android/release_log.txt
+test_limit.py
+
