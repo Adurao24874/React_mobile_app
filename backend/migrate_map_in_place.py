@@ -4,6 +4,7 @@ import time
 import math
 import numpy as np
 import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from supabase import create_client, Client
 
@@ -71,14 +72,15 @@ def load_junction_cells():
     """
     try:
         url = "https://overpass-api.de/api/interpreter"
-        data = urllib.request.urlopen(
-            urllib.request.Request(
-                url,
-                data=query.encode('utf-8'),
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            ),
-            timeout=60
-        ).read()
+        req = urllib.request.Request(
+            url,
+            data=f"data={urllib.parse.quote(query)}".encode('utf-8'),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+        )
+        data = urllib.request.urlopen(req, timeout=60).read()
         osm = json.loads(data)
 
         cells = set()

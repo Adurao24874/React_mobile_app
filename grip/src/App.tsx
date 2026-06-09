@@ -21,6 +21,7 @@ import type { BackgroundGeolocationPlugin } from '@capacitor-community/backgroun
 
 const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
 import GovernmentDashboard from './components/GovernmentDashboard';
+import PanchayatDashboard from './components/PanchayatDashboard';
 
 const CURRENT_APP_VERSION = "v1.1.0";
 
@@ -126,7 +127,7 @@ export function HeatmapLayer({ points }: { points: [number, number, number][] })
     return null;
 }
 
-export function DynamicMapLayers({ conditions, reports, showSensors, showReports, showHeatmap, getConditionColor }: any) {
+export function DynamicMapLayers({ conditions, reports, showSensors, showReports, showHeatmap, showAllConditions, getConditionColor }: any) {
     const map = useMap();
     const [zoom, setZoom] = useState(map.getZoom());
 
@@ -180,6 +181,8 @@ export function DynamicMapLayers({ conditions, reports, showSensors, showReports
                 // Heatmap only takes 'BAD' segments, so we hide 'BAD' pins to show the heatmap instead
                 const label = pt.label || pt.condition_label || '';
                 if (showHeatmap && label === 'BAD') return false;
+                // Hide MINOR, GOOD, and RUMBLE by default unless showAllConditions is true
+                if (!showAllConditions && (label === 'MINOR' || label === 'GOOD' || label === 'RUMBLE')) return false;
                 return inGoa;
             }).map((pt: any, i: number) => {
                 const label = pt.label || pt.condition_label || '';
@@ -201,11 +204,17 @@ export function DynamicMapLayers({ conditions, reports, showSensors, showReports
                     </CircleMarker>
                 );
             })}
-            {showReports && reports.filter((rep: any) => isInGoa(Number(rep.latitude), Number(rep.longitude))).map((rep: any, i: number) => (
-                <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={zoom <= 12 ? 5 : 9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: zoom < 12 ? 1 : 2 }}>
-                    <Popup><div className="max-w-[200px]">{rep.image_url && <img src={supabase.storage.from('reports').getPublicUrl(rep.image_url).data.publicUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
-                </CircleMarker>
-            ))}
+            {showReports && reports.filter((rep: any) => isInGoa(Number(rep.latitude), Number(rep.longitude))).map((rep: any, i: number) => {
+                const imgUrl = rep.image_path?.startsWith('uploads/') 
+                    ? `${import.meta.env.VITE_FASTAPI_URL}/${rep.image_path}`
+                    : supabase.storage.from('reports').getPublicUrl(rep.image_path || '').data.publicUrl;
+                
+                return (
+                    <CircleMarker key={`rep-${i}`} center={[rep.latitude, rep.longitude]} radius={zoom <= 12 ? 5 : 9} pathOptions={{ color: '#ffffff', fillColor: rep.issue_type === 'Garbage' ? '#a855f7' : '#ef4444', fillOpacity: 1, weight: zoom < 12 ? 1 : 2 }}>
+                        <Popup><div className="max-w-[200px]">{rep.image_path && <img src={imgUrl} alt="Report" className="w-full h-32 object-cover rounded mb-2" />}<p className="font-bold text-xs">{rep.issue_type}</p></div></Popup>
+                    </CircleMarker>
+                );
+            })}
         </>
     );
 }
@@ -252,22 +261,11 @@ function Home() {
 
 function GovLogin() {
     const navigate = useNavigate();
-    const [securityCode, setSecurityCode] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [errorMsg, setErrorMsg] = useState('');
-    const [step, setStep] = useState(1); // 1: Security Code, 2: Auth
 
-    const handleNext = (e: React.FormEvent) => {
-        e.preventDefault();
-        if (securityCode === '0000') {
-            setStep(2);
-            setErrorMsg('');
-        } else {
-            setErrorMsg('Invalid Security Code. Access Denied.');
-        }
-    };
 
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -275,11 +273,62 @@ function GovLogin() {
         setErrorMsg('');
 
         try {
-            const { error } = await supabase.auth.signInWithPassword({ email, password });
-            if (error) throw error;
+            let authSuccess = false;
+            try {
+                const { error } = await supabase.auth.signInWithPassword({ email, password });
+                if (error) {
+                    const { data } = await supabase.from('departments').select('contact_email').eq('contact_email', email.toLowerCase()).limit(1);
+                    if (data && data.length > 0) {
+                        console.warn("Auth bypassed based on DB presence for testing.");
+                        authSuccess = true;
+                    } else {
+                        throw new Error("Email not found in database.");
+                    }
+                } else {
+                    authSuccess = true;
+                }
+            } catch (authErr: any) {
+                if (authErr.message === "Email not found in database.") throw authErr;
+                const { data } = await supabase.from('departments').select('contact_email').eq('contact_email', email.toLowerCase()).limit(1);
+                if (data && data.length > 0) {
+                    console.warn("Auth bypassed based on DB presence for testing.");
+                    authSuccess = true;
+                } else {
+                    throw new Error("Email not found in database.");
+                }
+            }
+
+            if (!authSuccess) {
+                throw new Error("Authentication failed");
+            }
+
             localStorage.setItem('user_mode', 'government');
+            localStorage.setItem('gov_email', email);
             window.dispatchEvent(new Event('auth-change'));
-            navigate('/gov-dashboard');
+            
+            const targetEmail = email.toLowerCase();
+            let dest = localStorage.getItem('direct_redirect');
+            if (!dest || dest === '/gov-dashboard') {
+                try {
+                    const { data } = await supabase.from('departments').select('department_type').eq('contact_email', targetEmail).limit(1);
+                    if (data && data.length > 0 && data[0].department_type) {
+                        const type = data[0].department_type.toUpperCase();
+                        if (type.includes('PWD')) {
+                            dest = '/gov/pwd';
+                        } else if (type.includes('PANCHAYAT') || type.includes('MUNICIPAL')) {
+                            dest = '/gov/panchayat';
+                        } else {
+                            dest = '/gov/pwd';
+                        }
+                    } else {
+                        dest = '/gov/pwd';
+                    }
+                } catch (e) {
+                    dest = '/gov/pwd';
+                }
+            }
+            localStorage.removeItem('direct_redirect');
+            navigate(dest);
         } catch (error: any) {
             setErrorMsg(error.message || 'Authentication failed');
         } finally {
@@ -288,87 +337,99 @@ function GovLogin() {
     };
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen p-4 bg-slate-900">
-            <div className="w-full max-w-md p-8 bg-white dark:bg-zinc-800 rounded-3xl shadow-2xl relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-full h-2 bg-blue-600"></div>
-                
+        <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
                 <div className="mb-8 text-center">
-                    <div className="mx-auto w-16 h-16 bg-blue-50 dark:bg-blue-900/30 rounded-full flex items-center justify-center mb-4">
-                        <span className="text-2xl">🏛️</span>
-                    </div>
-                    <h2 className="text-3xl font-bold text-gray-900 dark:text-white">Gov Portal</h2>
-                    <p className="text-gray-500 dark:text-gray-400">Secure Government Access</p>
+                    <h1 className="text-3xl font-black text-slate-900 tracking-tight leading-none mb-2">GRIP</h1>
+                    <p className="text-slate-500 font-medium text-sm">Unified Government Access Portal</p>
                 </div>
 
                 {errorMsg && (
-                    <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm font-bold flex items-center gap-2">
+                    <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold flex items-center gap-2">
                         <span>⚠️</span> {errorMsg}
                     </div>
                 )}
 
-                {step === 1 ? (
-                    <form onSubmit={handleNext} className="space-y-6">
-                        <div>
-                            <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2 uppercase tracking-wider">Departmental Security Code</label>
-                            <input
-                                type="password"
-                                value={securityCode}
-                                onChange={e => setSecurityCode(e.target.value)}
-                                placeholder="••••"
-                                className="w-full px-6 py-4 rounded-2xl bg-gray-100 dark:bg-zinc-700 border-2 border-transparent focus:border-blue-500 outline-none transition-all text-center text-3xl tracking-[1em] font-mono dark:text-white"
-                                required
-                                autoFocus
-                            />
-                        </div>
-                        <button
-                            type="submit"
-                            className="w-full py-4 bg-blue-600 text-white font-black rounded-2xl shadow-lg hover:bg-blue-700 transition-all active:scale-95"
-                        >
-                            Verify Credentials
-                        </button>
-                    </form>
-                ) : (
-                    <form onSubmit={handleAuth} className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
-                        <div>
-                            <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Official Email</label>
-                            <input
-                                type="email"
-                                value={email}
-                                onChange={e => setEmail(e.target.value)}
-                                placeholder="admin@goa.gov.in"
-                                className="w-full px-4 py-3 rounded-xl bg-gray-100 dark:bg-zinc-700 border border-transparent focus:border-blue-500 outline-none transition-all dark:text-white font-medium"
-                                required
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-1">Password</label>
-                            <input
-                                type="password"
-                                value={password}
-                                onChange={e => setPassword(e.target.value)}
-                                placeholder="••••••••"
-                                className="w-full px-4 py-3 rounded-xl bg-gray-100 dark:bg-zinc-700 border border-transparent focus:border-blue-500 outline-none transition-all dark:text-white font-medium"
-                                required
-                            />
-                        </div>
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full mt-6 py-4 bg-gradient-to-r from-blue-600 to-indigo-700 text-white font-black rounded-2xl shadow-lg hover:opacity-90 transition-all active:scale-95 disabled:opacity-50"
-                        >
-                            {loading ? 'Authenticating...' : 'Complete Login'}
-                        </button>
+                {/* Dummy Login Form (Matches Web UI) */}
+                <form onSubmit={handleAuth} className="space-y-5">
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-1">Official Email</label>
+                        <input 
+                            type="email" 
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className="w-full px-4 py-3 rounded-lg border border-slate-300 text-slate-800 focus:border-blue-500 outline-none transition-all"
+                            placeholder="admin.mopa@grip.local"
+                            required
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-1">Password</label>
+                        <input 
+                            type="password" 
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className="w-full px-4 py-3 rounded-lg border border-slate-300 text-slate-800 focus:border-blue-500 outline-none transition-all"
+                            placeholder="••••••••"
+                            required
+                        />
+                    </div>
+                    <button 
+                        type="submit" 
+                        disabled={loading}
+                        className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 px-4 rounded-lg transition-all active:scale-95 disabled:opacity-50"
+                    >
+                        {loading ? 'Authenticating...' : 'Secure Login'}
+                    </button>
+                </form>
+
+                {/* DEVELOPMENT BYPASS BUTTONS (Matches Web UI) */}
+                <div className="mt-8 pt-6 border-t border-slate-200">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center mb-4">
+                        Direct Access
+                    </p>
+                    <div className="space-y-3">
                         <button 
-                            type="button" 
-                            onClick={() => setStep(1)}
-                            className="w-full text-sm text-gray-500 font-bold hover:text-gray-700 dark:hover:text-gray-300 pt-2"
+                            onClick={() => { 
+                                localStorage.setItem('user_mode', 'government');
+                                localStorage.removeItem('gov_email');
+                                window.dispatchEvent(new Event('auth-change'));
+                                navigate('/gov/pwd');
+                            }}
+                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-xl flex justify-between items-center transition-all shadow-lg active:scale-95"
                         >
-                            ← Back to Security Code
+                            <span className="text-sm font-black uppercase tracking-tight">🗺️ PWD Master</span>
+                            <ArrowRight className="w-4 h-4" />
                         </button>
-                    </form>
-                )}
+
+                        <button 
+                            onClick={() => { 
+                                localStorage.setItem('user_mode', 'government');
+                                localStorage.removeItem('gov_email');
+                                window.dispatchEvent(new Event('auth-change'));
+                                navigate('/gov/panchayat');
+                            }}
+                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 px-6 rounded-xl flex justify-between items-center transition-all shadow-lg active:scale-95"
+                        >
+                            <span className="text-sm font-black uppercase tracking-tight">🗑️ Panchayat Master</span>
+                            <ArrowRight className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+
+                <div className="mt-6 text-center">
+                    <Link 
+                        to="/" 
+                        onClick={() => {
+                            localStorage.removeItem('user_mode');
+                            window.dispatchEvent(new Event('auth-change'));
+                        }}
+                        className="text-xs font-bold text-slate-400 hover:text-slate-600 uppercase tracking-widest transition-colors"
+                    >
+                        ← Back to Public
+                    </Link>
+                </div>
             </div>
-            <Link to="/" className="mt-8 text-white/50 text-sm font-bold hover:text-white">← Return to Public Portal</Link>
         </div>
     );
 }
@@ -555,37 +616,67 @@ function GuideMe() {
     const [isActive, setIsActive] = useState(false);
     const [segments, setSegments] = useState<any[]>([]);
     const [loc, setLoc] = useState<{ lat: number, lng: number } | null>(null);
+    const [gpsStatus, setGpsStatus] = useState<{ accuracy: number; speed: number; speedKmh: number } | null>(null);
+    const [isMapLoaded, setIsMapLoaded] = useState(false);
     const geoWatchId = useRef<string | null>(null);
 
     useEffect(() => {
         const fetchMap = async () => {
+            setIsMapLoaded(false);
             let all: any[] = [];
             let from = 0;
-            const PAGE_SIZE = 1000;
-            while (from < 50000) {
-                const { data } = await supabase.from('road_segments').select('*')
-                    .gte('latitude', GOA_BOUNDS.minLat).lte('latitude', GOA_BOUNDS.maxLat)
-                    .gte('longitude', GOA_BOUNDS.minLng).lte('longitude', GOA_BOUNDS.maxLng)
-                    .range(from, from + PAGE_SIZE - 1);
-                if (!data || data.length === 0) break;
-                all = [...all, ...data];
-                if (data.length < PAGE_SIZE) break;
-                from += PAGE_SIZE;
+            const PAGE_SIZE = 2000; // Increased page size for faster fetch
+            try {
+                while (from < 30000) {
+                    const { data, error } = await supabase.from('road_segments').select('segment_id, latitude, longitude, label, condition_label')
+                        .gte('latitude', GOA_BOUNDS.minLat).lte('latitude', GOA_BOUNDS.maxLat)
+                        .gte('longitude', GOA_BOUNDS.minLng).lte('longitude', GOA_BOUNDS.maxLng)
+                        .range(from, from + PAGE_SIZE - 1);
+                    
+                    if (error) throw error;
+                    if (!data || data.length === 0) break;
+                    all = [...all, ...data];
+                    if (data.length < PAGE_SIZE) break;
+                    from += PAGE_SIZE;
+                }
+                setSegments(all);
+                setIsMapLoaded(true);
+            } catch (e) {
+                console.error("Map fetch failed:", e);
+                setIsMapLoaded(true); // Allow anyway, but with 0 segments
             }
-            setSegments(all);
         };
         fetchMap();
+
+        // Initial location fix
+        Geolocation.getCurrentPosition({ enableHighAccuracy: true }).then(pos => {
+            setLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        }).catch(e => console.warn("Initial GPS fix failed", e));
+
         return () => { stopGuide(); };
     }, []);
 
     const startGuide = async () => {
+        if (!isMapLoaded) {
+            alert("Still loading hazard data. Please wait...");
+            return;
+        }
+
         setIsActive(true);
-        try {
-            const audio = new Audio('/audio/activated.mp3');
-            audio.play().catch(e => console.error("Could not play init sound:", e));
-        } catch (e) { }
+        AudioWarningService.playWarning('ACTIVATED');
 
         try {
+            // First, ensure we have an immediate position fix
+            const current = await Geolocation.getCurrentPosition({ enableHighAccuracy: true });
+            if (current) {
+                setLoc({ lat: current.coords.latitude, lng: current.coords.longitude });
+                setGpsStatus({ 
+                    accuracy: current.coords.accuracy, 
+                    speed: current.coords.speed || 0,
+                    speedKmh: Math.round((current.coords.speed || 0) * 3.6)
+                });
+            }
+
             const watcherId = await BackgroundGeolocation.addWatcher({
                 backgroundMessage: "Scanning for road hazards",
                 backgroundTitle: "GRIP Audio Guide",
@@ -595,7 +686,12 @@ function GuideMe() {
             }, (position) => {
                 if (position) {
                     setLoc({ lat: position.latitude, lng: position.longitude });
-                    // Pass speed (m/s) and bearing (degrees) to the advanced proximity engine
+                    setGpsStatus({ 
+                        accuracy: position.accuracy, 
+                        speed: position.speed || 0,
+                        speedKmh: Math.round((position.speed || 0) * 3.6)
+                    });
+                    
                     AudioWarningService.checkProximity(
                         position.latitude,
                         position.longitude,
@@ -608,7 +704,7 @@ function GuideMe() {
             geoWatchId.current = watcherId;
         } catch (e) {
             console.error("GPS Watcher error", e);
-            alert("Could not start GPS tracking.");
+            alert("Could not start background GPS. Ensure Location is set to 'Allow all the time'.");
             setIsActive(false);
         }
     };
@@ -621,11 +717,33 @@ function GuideMe() {
         }
     };
 
+    const resyncGps = async () => {
+        try {
+            const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true });
+            setLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+            setGpsStatus({ 
+                accuracy: pos.coords.accuracy, 
+                speed: pos.coords.speed || 0,
+                speedKmh: Math.round((pos.coords.speed || 0) * 3.6)
+            });
+        } catch (e) {
+            alert("GPS Refresh Failed. Check location settings.");
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 flex flex-col">
-            <div className="bg-gradient-to-r from-purple-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4 shadow-md z-10">
-                <button onClick={() => { stopGuide(); navigate(-1); }} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ArrowLeft className="w-6 h-6" /></button>
-                <h1 className="text-xl font-bold">Audio Guide Mode</h1>
+            <div className="bg-gradient-to-r from-purple-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center justify-between shadow-md z-10">
+                <div className="flex items-center gap-4">
+                    <button onClick={() => { stopGuide(); navigate(-1); }} className="p-2 hover:bg-white/10 rounded-full transition-colors"><ArrowLeft className="w-6 h-6" /></button>
+                    <h1 className="text-xl font-bold">Audio Guide</h1>
+                </div>
+                {!isMapLoaded && (
+                    <div className="flex items-center gap-2 bg-white/20 px-3 py-1 rounded-full animate-pulse">
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span className="text-xs font-bold">Loading Data</span>
+                    </div>
+                )}
             </div>
 
             <div className="flex-1 relative">
@@ -637,31 +755,57 @@ function GuideMe() {
                             reports={[]}
                             showSensors={true}
                             showReports={false}
-                            getConditionColor={(label: string) => {
-                                switch (label) {
-                                    case 'POTHOLE': return '#dc2626';
-                                    case 'BAD': return '#ef4444';
-                                    case 'OBSTACLE': return '#a855f7';
-                                    case 'HUMP': return '#3b82f6';
-                                    case 'RUMBLE': return '#eab308';
-                                    case 'MINOR': return '#f59e0b';
-                                    case 'GOOD': default: return '#22c55e';
-                                }
-                            }}
+                            getConditionColor={getConditionColor}
                         />
                         {loc && <Marker position={[loc.lat, loc.lng]} icon={blueDotIcon} />}
                         <LiveMapUpdater position={loc} />
                     </MapContainer>
                 </div>
 
-                <div className="absolute bottom-8 left-4 right-4 z-10 flex flex-col gap-4">
-                    <div className="bg-white/95 dark:bg-zinc-800/95 p-4 rounded-2xl shadow-xl backdrop-blur text-center pointer-events-auto">
-                        <h2 className="text-lg font-bold mb-1 dark:text-white">Hazard Alerts</h2>
-                        <p className="text-xs text-gray-500 mb-4">Drive safely. You'll hear a warning if you approach a known pothole or bad road.</p>
+                {/* GPS Status Overlay */}
+                <div className="absolute top-4 left-4 right-4 z-10 flex gap-2">
+                    <div className="bg-white/90 dark:bg-zinc-800/90 backdrop-blur px-4 py-2 rounded-2xl shadow-lg border border-slate-200 flex-1 flex justify-between items-center">
+                        <div className="flex flex-col">
+                            <span className="text-[10px] uppercase font-bold text-slate-400">Signal Accuracy</span>
+                            <span className={`text-sm font-black ${gpsStatus?.accuracy && gpsStatus.accuracy < 20 ? 'text-emerald-500' : 'text-amber-500'}`}>
+                                {gpsStatus ? `±${Math.round(gpsStatus.accuracy)}m` : 'Waiting...'}
+                            </span>
+                        </div>
+                        <div className="flex flex-col items-end">
+                            <span className="text-[10px] uppercase font-bold text-slate-400">Current Speed</span>
+                            <span className="text-sm font-black text-blue-600">
+                                {gpsStatus ? `${gpsStatus.speedKmh} km/h` : '0 km/h'}
+                            </span>
+                        </div>
+                    </div>
+                    <button onClick={resyncGps} className="bg-white/90 dark:bg-zinc-800/90 p-3 rounded-2xl shadow-lg border border-slate-200 text-blue-600 active:scale-95 transition-all">
+                        <RefreshCw className="w-5 h-5" />
+                    </button>
+                </div>
 
-                        <button onClick={isActive ? stopGuide : startGuide} className={`w-full py-4 text-white font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95 ${isActive ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-600 hover:bg-blue-700'}`}>
+                <div className="absolute bottom-8 left-4 right-4 z-10 flex flex-col gap-4">
+                    <div className="bg-white/95 dark:bg-zinc-800/95 p-5 rounded-[32px] shadow-2xl backdrop-blur text-center pointer-events-auto border border-white/20">
+                        <div className="flex justify-center mb-4">
+                            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${isActive ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'}`}>
+                                {isActive ? <Activity className="w-6 h-6 animate-pulse" /> : <Volume2 className="w-6 h-6" />}
+                            </div>
+                        </div>
+                        <h2 className="text-xl font-black mb-1 dark:text-white uppercase tracking-tight">
+                            {isActive ? 'Hazard Scanning Active' : 'Road Hazard Alerts'}
+                        </h2>
+                        <p className="text-xs text-slate-400 font-medium mb-6 px-4">
+                            {isActive 
+                                ? "Audio warnings will play as you approach potholes or bad road segments." 
+                                : "Start scanning to receive real-time voice alerts for infrastructure issues."}
+                        </p>
+
+                        <button 
+                            onClick={isActive ? stopGuide : startGuide} 
+                            disabled={!isMapLoaded}
+                            className={`w-full py-4 text-white font-black rounded-2xl flex items-center justify-center gap-3 shadow-xl transition-all active:scale-95 disabled:opacity-50 ${isActive ? 'bg-red-500 hover:bg-red-600 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}
+                        >
                             {isActive ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-                            {isActive ? "Stop Guide" : "Start Audio Guide"}
+                            {isActive ? "Disable Audio Alerts" : "Enable Audio Alerts"}
                         </button>
                     </div>
                 </div>
@@ -1026,7 +1170,6 @@ function PotholeDetection() {
                     normalizedReadings.forEach((reading: any) => {
                         if (reading.lat && reading.lng) {
                             const region = mapToRegion(reading.lat, reading.lng);
-                            const accelMagnitude = Math.sqrt(reading.accelX ** 2 + reading.accelY ** 2 + reading.accelZ ** 2);
                             updateRegion(region.x, region.y, { lat: reading.lat, lng: reading.lng }, reading.accelZ);
                         }
                     });
@@ -1278,6 +1421,7 @@ function MapViewer() {
     const [showSensors, setShowSensors] = useState(true);
     const [showReports, setShowReports] = useState(true);
     const [showFilters, setShowFilters] = useState(false);
+    const [showAllConditions, setShowAllConditions] = useState(false);
 
     const fetchMapLayer = async () => {
         setLoading(true);
@@ -1289,7 +1433,7 @@ function MapViewer() {
             const MAX_POINTS = 50000;
 
             while (from < MAX_POINTS) {
-                const { data, error } = await supabase
+                let query = supabase
                     .from('road_segments')
                     .select('*')
                     .gte('latitude', GOA_BOUNDS.minLat)
@@ -1298,6 +1442,12 @@ function MapViewer() {
                     .lte('longitude', GOA_BOUNDS.maxLng)
                     .order('last_updated', { ascending: false })
                     .range(from, from + PAGE_SIZE - 1);
+
+                if (!showAllConditions) {
+                    query = query.in('label', ['POTHOLE', 'BAD', 'OBSTACLE', 'HUMP']);
+                }
+
+                const { data, error } = await query;
 
                 if (error) throw error;
                 if (!data || data.length === 0) break;
@@ -1329,7 +1479,7 @@ function MapViewer() {
         }
     };
 
-    useEffect(() => { fetchMapLayer(); }, []);
+    useEffect(() => { fetchMapLayer(); }, [showAllConditions]);
 
     return (
         <div className="h-screen flex flex-col bg-zinc-900 relative">
@@ -1358,6 +1508,7 @@ function MapViewer() {
                             reports={reports}
                             showSensors={showSensors}
                             showReports={showReports}
+                            showAllConditions={showAllConditions}
                             getConditionColor={getConditionColor}
                         />
                         <LocateControl />
@@ -1368,6 +1519,7 @@ function MapViewer() {
                             <h3 className="font-bold text-sm uppercase tracking-wider border-b pb-2">Layers</h3>
                             <label className="flex items-center justify-between cursor-pointer"><span className="text-sm">Sensors</span><input type="checkbox" checked={showSensors} onChange={() => setShowSensors(!showSensors)} /></label>
                             <label className="flex items-center justify-between cursor-pointer"><span className="text-sm">Reports</span><input type="checkbox" checked={showReports} onChange={() => setShowReports(!showReports)} /></label>
+                            <label className="flex items-center justify-between cursor-pointer"><span className="text-sm">Minor/Good/Rumble</span><input type="checkbox" checked={showAllConditions} onChange={() => setShowAllConditions(!showAllConditions)} /></label>
                         </div>
                     )}
                     <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] bg-white/95 dark:bg-zinc-800/95 px-5 py-3 rounded-full shadow-xl flex gap-4 text-[10px] font-bold text-gray-700 pointer-events-auto">
@@ -1453,6 +1605,46 @@ function ForcedUpdateModal({ updateUrl }: { updateUrl: string }) {
         </div>
     );
 }
+function GovDashboardRedirect() {
+    const [redirectPath, setRedirectPath] = useState<string | null>(null);
+
+    useEffect(() => {
+        supabase.auth.getSession().then(async ({ data: { session } }) => {
+            const email = session?.user?.email || localStorage.getItem('gov_email');
+            if (email) {
+                try {
+                    const { data } = await supabase.from('departments').select('department_type').eq('contact_email', email.toLowerCase()).limit(1);
+                    if (data && data.length > 0 && data[0].department_type) {
+                        const type = data[0].department_type.toUpperCase();
+                        if (type.includes('PWD')) {
+                            setRedirectPath('/gov/pwd');
+                        } else if (type.includes('PANCHAYAT') || type.includes('MUNICIPAL')) {
+                            setRedirectPath('/gov/panchayat');
+                        } else {
+                            setRedirectPath('/gov/pwd');
+                        }
+                    } else {
+                        setRedirectPath('/gov/pwd');
+                    }
+                } catch (e) {
+                    setRedirectPath('/gov/pwd');
+                }
+            } else {
+                setRedirectPath('/gov-login');
+            }
+        });
+    }, []);
+
+    if (!redirectPath) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-slate-900">
+                <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+        );
+    }
+
+    return <Navigate to={redirectPath} replace />;
+}
 
 function App() {
     const [session, setSession] = useState<Session | null>(null);
@@ -1510,10 +1702,12 @@ function App() {
                 <Routes>
                     <Route path="/" element={(!session && userMode !== 'government') ? <Home /> : (userMode === 'government' ? <Navigate to="/gov-dashboard" /> : <Navigate to="/dashboard" />)} />
                     <Route path="/login" element={!session ? <Login /> : <Navigate to="/dashboard" />} />
-                    <Route path="/gov-login" element={(userMode !== 'government' && !session) ? <GovLogin /> : <Navigate to="/gov-dashboard" />} />
+                    <Route path="/gov-login" element={<GovLogin />} />
                     
                     <Route path="/dashboard" element={session ? <Dashboard /> : <Navigate to="/login" />} />
-                    <Route path="/gov-dashboard" element={session ? <GovernmentDashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov-dashboard" element={<GovDashboardRedirect />} />
+                    <Route path="/gov/pwd" element={session || userMode === 'government' ? <GovernmentDashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov/panchayat" element={session || userMode === 'government' ? <GovernmentDashboard /> : <Navigate to="/gov-login" />} />
                     
                     <Route path="/report/garbage" element={session ? <ReportGarbage /> : <Navigate to="/login" />} />
                     <Route path="/report/pothole" element={session ? <PotholeDetection /> : <Navigate to="/login" />} />

@@ -1,0 +1,281 @@
+{
+  "name": "Authority-Alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "933e402a-6a20-43f4-9c57-46f54e5b6c9c",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "dc19b8dd-a975-41f7-99a1-e3d24ee51b4d",
+      "name": "Webhook",
+      "webhookId": "933e402a-6a20-43f4-9c57-46f54e5b6c9c"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH current_report AS (\n    -- 1. Get the GPS coordinates of the new report coming from n8n\n    SELECT id, latitude, longitude\n    FROM reports \n    WHERE id::text = '{{ $json.body.record.report_id }}'::text\n),\nnearby_je AS (\n    -- 2. SPATIAL GROUPING: Is a JE already working within 200 meters?\n    SELECT f.id::text AS worker_id\n    FROM work_orders w\n    JOIN reports r ON w.report_id::text = r.id::text\n    JOIN field_workers f ON w.worker_id::text = f.id::text\n    JOIN current_report cr ON true\n    WHERE w.status = 'Pending'\n      AND w.report_id::text != cr.id::text\n      AND f.department_id::text = '{{ $json.body.record.department_id }}'::text\n      AND f.hierarchy_level = 2 -- JEs are now Level 2!\n      -- PostGIS math: 200 meter radius\n      AND ST_DWithin(\n            ST_SetSRID(ST_MakePoint(r.longitude, r.latitude), 4326)::geography,\n            ST_SetSRID(ST_MakePoint(cr.longitude, cr.latitude), 4326)::geography,\n            200\n          )\n    LIMIT 1\n),\nworkloads AS (\n    -- 3. YOUR LOAD BALANCING: Calculate the total effort score for all JEs in this department\n    SELECT \n        f.id::text AS worker_id, \n        f.worker_name, \n        f.email AS worker_email,\n        COALESCE(SUM(ic.effort_weight), 0) AS total_effort_score,\n        f.last_assigned_at\n    FROM field_workers f\n    LEFT JOIN work_orders w ON f.id::text = w.worker_id::text AND w.status = 'Pending'\n    LEFT JOIN reports r ON w.report_id::text = r.id::text\n    LEFT JOIN issue_categories ic ON r.issue_type = ic.category_name\n    WHERE f.department_id::text = '{{ $json.body.record.department_id }}'::text\n      AND f.hierarchy_level = 2 -- Updated to Level 2\n    GROUP BY f.id, f.worker_name, f.email, f.last_assigned_at\n)\n-- 4. THE DECISION ENGINE\nSELECT \n    w.worker_id, \n    w.worker_name, \n    w.worker_email,\n    w.total_effort_score,\n    (SELECT issue_type FROM reports WHERE id::text = '{{ $json.body.record.report_id }}'::text) AS issue_type,\n    -- Tells n8n if this was assigned based on location or effort!\n    (SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END FROM nearby_je) AS is_grouped_assignment\nFROM workloads w\nORDER BY \n    -- PRIORITY 1: If a JE is working nearby, force them to the top of the list!\n    CASE WHEN w.worker_id IN (SELECT worker_id FROM nearby_je) THEN 0 ELSE 1 END ASC,\n    \n    -- PRIORITY 2: Otherwise, give it to the JE with the lowest Effort Score\n    w.total_effort_score ASC,\n    \n    -- PRIORITY 3: Tie-breaker - Give it to whoever hasn't been assigned a ticket recently\n    w.last_assigned_at ASC NULLS FIRST\nLIMIT 1;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        208,
+        0
+      ],
+      "id": "eda9b00c-63cb-486c-9e73-3531c209cf45",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "FljvEdSNAQxdA1wA",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list",
+          "cachedResultName": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "work_orders",
+          "mode": "list",
+          "cachedResultName": "work_orders"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "department_id": 0,
+            "escalation_level": 0,
+            "id": "={{ $('Webhook').item.json.body.record.id }}",
+            "report_id": "=",
+            "worker_id": "={{ $node[\"Execute a SQL query\"].json[\"worker_id\"] }}",
+            "status": "Dispatched"
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "report_id",
+              "displayName": "report_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "department_id",
+              "displayName": "department_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "worker_id",
+              "displayName": "worker_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "due_date",
+              "displayName": "due_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolved_at",
+              "displayName": "resolved_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "escalation_level",
+              "displayName": "escalation_level",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "resolution_image_url",
+              "displayName": "resolution_image_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        832,
+        0
+      ],
+      "id": "da7f1673-110e-4714-ba55-76eb281a039b",
+      "name": "Update rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "FljvEdSNAQxdA1wA",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer re_cN3swB79_2GD9MjwZwLiKiNcvSAPtriJ3"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"GRIP Dispatch <alerts@grip-goa.online>\",\n  \"to\": [\"{{ $json.worker_email }}\"],\n  \"subject\": \"GRIP Dispatch: New Task Assigned\",\n  \"html\": \"<p>Hello <b>{{ $json.worker_name }}</b>,</p><p>You have been assigned a new infrastructure repair task based on your current workload.</p><ul><li><b>Issue:</b> {{ $json.issue_type }}</li><li><b>Current Load Score:</b> {{ $json.total_effort_score }}</li></ul><p>Please log in to the GRIP Dashboard to view location details.</p>\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        624,
+        0
+      ],
+      "id": "cc17013b-eeeb-448f-9d52-81cc4b590433",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE field_workers \nSET last_assigned_at = NOW() \nWHERE id = '{{ $json[\"worker_id\"] }}'\nRETURNING id AS worker_id, worker_name, email AS worker_email;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        416,
+        0
+      ],
+      "id": "5daad918-51f9-47f1-89d5-013f7377fc79",
+      "name": "Execute a SQL query1",
+      "credentials": {
+        "postgres": {
+          "id": "FljvEdSNAQxdA1wA",
+          "name": "Postgres account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Update rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "622d3297-3b72-4e91-b945-1b67e17aebac",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "941b6de2e7fc8454613dec48b10b1cb7763875a6746c1034d4db0f4696bea4b6"
+  },
+  "id": "EDGLEzzpEMoDObeH",
+  "tags": []
+}

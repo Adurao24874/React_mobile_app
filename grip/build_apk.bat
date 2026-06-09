@@ -3,6 +3,8 @@ echo =======================================================
 echo Building Android Debug APK for Grip App
 echo =======================================================
 
+echo Building web assets...
+call npm run build
 echo Syncing latest web assets with Android project...
 call npx cap sync android
 

@@ -99,7 +99,7 @@ export const SyncEngine = {
                         longitude: issue.lng,
                         timestamp: issue.timestamp,
                         image_path: fileName,
-                        status: 'pending' // Python Worker grabs this
+                        status: 'new' // Python Worker grabs this
                     });
 
                 if (dbError) throw new Error(`DB Error: ${dbError.message}`);

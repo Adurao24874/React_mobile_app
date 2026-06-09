@@ -5,12 +5,28 @@ import asyncio
 import requests
 import base64
 from typing import List, Optional
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException, status, Security
+from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 from ultralytics import YOLO
 from PIL import Image
+import secrets
+
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+def get_api_key(api_key: str = Security(api_key_header)):
+    # Read from environment, or use a default for local development MVP
+    expected_key = os.environ.get("GRIP_API_KEY", "grip_secure_ai_key_2026")
+    if not api_key or not secrets.compare_digest(api_key, expected_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key",
+        )
+    return api_key
 
 app = FastAPI(title="GRIP Data API - ML Enabled")
 
@@ -23,7 +39,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. Setup Supabase Client
+# 2. Mount Static Files
+os.makedirs("uploads/images", exist_ok=True)
+os.makedirs("uploads/sensors", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+# 3. Setup Supabase Client
 URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
 KEY = "sb_publishable_DF1cQCw9e1eefh2b3y3gtA_OIUyZsem"
 supabase: Client = create_client(URL, KEY)
@@ -215,7 +236,8 @@ async def upload_issue(
             "longitude": lng,
             "timestamp": timestamp,
             "image_path": file_path, # In production this would be an S3 bucket URL
-            "ai_predictions": json.dumps(predictions) # Storing the JSON results of what the AI found
+            "ai_predictions": json.dumps(predictions), # Storing the JSON results of what the AI found
+            "status": "pending"
         }).execute()
         
         print(f"📦 Successfully logged report to Supabase: {detected_type}")
@@ -229,6 +251,134 @@ async def upload_issue(
         "ai_results": predictions,
         "detected_type": detected_type
     }
+
+
+# --------------------------
+# CLOUD ORCHESTRATION WEBHOOK
+# --------------------------
+from shapely.geometry import shape, Point
+
+# Load Goa Villages for routing
+GOA_VILLAGES = []
+geojson_path = os.path.join(BASE_DIR, '..', 'grip-dashboard', 'goa_villages.geojson')
+try:
+    with open(geojson_path, 'r', encoding='utf-8') as f:
+        geo_data = json.load(f)
+        for feature in geo_data.get('features', []):
+            poly = shape(feature['geometry'])
+            name = feature['properties'].get('NAME', 'Unknown Village')
+            GOA_VILLAGES.append((name, poly))
+except Exception as e:
+    print(f"⚠️ Failed to load geojson: {e}")
+
+def get_village_name(lat, lon):
+    if not lat or not lon: return None
+    pt = Point(lon, lat)
+    for name, poly in GOA_VILLAGES:
+        if poly.contains(pt):
+            return name
+    return None
+
+class WebhookRecord(BaseModel):
+    id: str
+
+class SupabaseWebhookPayload(BaseModel):
+    record: WebhookRecord
+
+@app.post("/ai/process-report")
+async def process_report_webhook(payload: SupabaseWebhookPayload, api_key: str = Depends(get_api_key)):
+    try:
+        report_id = payload.record.id
+        print(f"\n--> 🚀 [WEBHOOK] Processing Report {report_id}")
+        
+        # 1. Fetch report details
+        res = supabase.table('reports').select('*').eq('id', report_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Report not found")
+            
+        report = res.data[0]
+        image_path = report.get('image_path')
+        
+        # 🚨 INFINITE LOOP PROTECTION: If AI has already processed this, or it failed, SKIP IT!
+        if report.get('ai_predictions') is not None or report.get('status') == 'failed':
+            print(f"--> 🛑 [WEBHOOK] Report {report_id} already processed. Skipping to prevent loop.")
+            return {"status": "skipped", "reason": "already processed"}
+            
+        if not image_path:
+            supabase.table('reports').update({"status": "failed"}).eq("id", report_id).execute()
+            raise HTTPException(status_code=400, detail="No image_path in report")
+
+        # 2. Download from Supabase with retry (Race Condition Fix)
+        img_bytes = None
+        for attempt in range(10):
+            try:
+                img_bytes = supabase.storage.from_('reports').download(image_path)
+                break # Success!
+            except Exception as e:
+                if attempt == 9:
+                    raise Exception(f"Image failed to upload to storage after 10 seconds: {e}")
+                import time
+                time.sleep(1) # Wait for mobile app to finish uploading
+                
+        local_dir = os.path.join(BASE_DIR, 'uploads', 'images')
+        filename = os.path.basename(image_path)
+        local_img_path = os.path.join(local_dir, filename)
+        
+        with open(local_img_path, 'wb') as f:
+            f.write(img_bytes)
+            
+        pil_img = Image.open(local_img_path).convert('RGB')
+        
+        # Cleanup storage to save space
+        try:
+            supabase.storage.from_('reports').remove([image_path])
+        except: pass
+
+        # 3. Run Inference
+        predictions = []
+        if pothole_model:
+            p_res = pothole_model.predict(source=pil_img, conf=0.15, save=False, verbose=False)
+            predictions.extend(parse_yolo_results(p_res))
+        if garbage_model:
+            g_res = garbage_model.predict(source=pil_img, conf=0.15, save=False, verbose=False)
+            predictions.extend(parse_yolo_results(g_res))
+
+        original_type = report.get('issue_type', '')
+        detected_type = original_type if original_type and original_type.lower() != 'auto' else 'Unknown'
+        
+        if predictions:
+            predictions.sort(key=lambda x: x['confidence'], reverse=True)
+            exact_class = str(predictions[0]['class'])
+            detected_type = exact_class.replace('_', ' ').title()
+
+        # 4. Update Database
+        update_payload = {
+            "status": "pending",
+            "issue_type": detected_type,
+            "ai_predictions": json.dumps(predictions),
+            "image_path": f"uploads/images/{filename}"
+        }
+
+        if not report.get('village_name') and report.get('latitude') and report.get('longitude'):
+            v_name = get_village_name(report['latitude'], report['longitude'])
+            if v_name: update_payload['village_name'] = v_name
+
+        supabase.table('reports').update(update_payload).eq("id", report_id).execute()
+        
+        print(f"--> ✅ [WEBHOOK] Finished Report {report_id}")
+        return {"status": "success", "issue_type": detected_type, "predictions": len(predictions)}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"CRITICAL ERROR IN WEBHOOK: {error_trace}")
+        with open("crash_log.txt", "w") as f:
+            f.write(error_trace)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 
 # Models for Sensor Batch endpoint

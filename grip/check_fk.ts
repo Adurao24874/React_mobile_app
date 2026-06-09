@@ -1,0 +1,1 @@
+import { createClient } from @supabase/supabase-js; const supabase = createClient(https://ytmuudbkuhkfqkzchtce.supabase.co, sb_publishable_DF1cQCw9e1eefh2b3y3gtA_OIUyZsem); async function run() { const { data } = await supabase.rpc(get_schema); console.log(OK); } run();

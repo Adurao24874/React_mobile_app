@@ -1,0 +1,107 @@
+{
+  "name": "Midnight SLA Escalation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "9170d5ba-2b3b-4dac-a9af-f686196d7b01",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE reports\nSET current_level = 2,\n    escalation_deadline = NOW() + interval '7 days'\nWHERE LOWER(status) = 'pending' \n  AND current_level = 1 \n  AND escalation_deadline < NOW()\nRETURNING id, issue_type, latitude, longitude;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        208,
+        0
+      ],
+      "id": "d062bacc-f4c9-4fe5-8f5e-a266c48db9b0",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "FljvEdSNAQxdA1wA",
+          "name": "Postgres account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer re_cN3swB79_2GD9MjwZwLiKiNcvSAPtriJ3"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"GRIP Dispatch <alerts@grip-goa.online>\",\n  \"to\": [\"grip.alerts.goa@gmail.com\"],\n  \"subject\": \"ESCALATION ALERT: Unresolved Infrastructure Issue #{{ $json.id }}\",\n  \"html\": \"<p><b>URGENT ESCALATION</b></p><p>An infrastructure report has missed its Level 1 deadline and has been automatically escalated to Level 2.</p><ul><li><b>Report ID:</b> {{ $json.id }}</li><li><b>Issue Type:</b> {{ $json.issue_type }}</li><li><b>Location:</b> <a href=\\\"https://maps.google.com/?q={{ $json.latitude }},{{ $json.longitude }}\\\">View on Google Maps</a></li></ul><p>Please review immediately on the GRIP Dashboard.</p>\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        416,
+        0
+      ],
+      "id": "c472a7a1-01ea-4c5d-9db8-9b88184d3e79",
+      "name": "HTTP Request"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "3ca3ccfe-41ca-49e8-9e98-90897e42f728",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "941b6de2e7fc8454613dec48b10b1cb7763875a6746c1034d4db0f4696bea4b6"
+  },
+  "id": "CVbU8NBdxwVGsGWo",
+  "tags": []
+}

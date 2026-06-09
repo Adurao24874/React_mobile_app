@@ -5,6 +5,7 @@ import asyncio
 import math
 import threading
 import urllib.request
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 from PIL import Image
@@ -12,6 +13,30 @@ from ultralytics import YOLO
 from spatial_grid import map_to_region, get_region_key
 from region_analysis import find_avoided_regions, find_hotspot_regions, compute_density_ratio
 from statistics import compute_rms, compute_deviation, compute_peak_acceleration
+from shapely.geometry import shape, Point
+
+# 0. Load Goa Villages GeoJSON for Offline Spatial Routing
+GOA_VILLAGES = []
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+geojson_path = os.path.join(BASE_DIR, '..', 'grip-dashboard', 'goa_villages.geojson')
+try:
+    with open(geojson_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+        for feature in data.get('features', []):
+            poly = shape(feature['geometry'])
+            name = feature['properties'].get('NAME', 'Unknown Village')
+            GOA_VILLAGES.append((name, poly))
+    print(f"🌍 Loaded {len(GOA_VILLAGES)} village boundaries for spatial routing.")
+except Exception as e:
+    print(f"⚠️ Failed to load goa_villages.geojson: {e}")
+
+def get_village_name(lat, lon):
+    if not lat or not lon: return None
+    pt = Point(lon, lat) # GeoJSON expects (longitude, latitude)
+    for name, poly in GOA_VILLAGES:
+        if poly.contains(pt):
+            return name
+    return None
 
 # Thresholds for Avoidance Detection
 LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
@@ -89,21 +114,18 @@ def heartbeat_worker():
                 old_reports = supabase.table('reports').select('image_path').eq('status', 'completed').lt('created_at', cutoff).execute()
                 for r in old_reports.data:
                     path = r.get('image_path')
-                    if path:
+                    if path and not path.startswith('uploads/'):
                         try:
                             supabase.storage.from_('reports').remove([path])
-                            # Clear path in DB so we don't try to delete again next hour
-                            supabase.table('reports').update({"image_path": None}).eq('image_path', path).execute()
                         except: pass
                 
                 # Cleanup Old Sensors (JSON Telemetry)
                 old_sensors = supabase.table('sensors').select('local_file_path').eq('status', 'completed').lt('created_at', cutoff).execute()
                 for s in old_sensors.data:
                     path = s.get('local_file_path')
-                    if path and path != 'SERVER_HEARTBEAT':
+                    if path and not path.startswith('uploads/') and path != 'SERVER_HEARTBEAT':
                         try:
                             supabase.storage.from_('reports').remove([path])
-                            supabase.table('sensors').update({"local_file_path": "CLEANED"}).eq('local_file_path', path).execute()
                         except: pass
                 
                 last_cleanup = now
@@ -152,14 +174,25 @@ def process_report(report):
     try:
         # Supabase python client storage download returns bytes
         res = supabase.storage.from_('reports').download(image_path)
-        # res is a bytes array
         
-        # Save temp image relative to the script directory to avoid permission issues
-        temp_img_path = os.path.join(BASE_DIR, 'temp_worker_img.jpg')
-        with open(temp_img_path, 'wb') as f:
+        # Save image permanently to local server storage
+        local_dir = os.path.join(BASE_DIR, 'uploads', 'images')
+        os.makedirs(local_dir, exist_ok=True)
+        filename = os.path.basename(image_path)
+        local_img_path = os.path.join(local_dir, filename)
+        
+        with open(local_img_path, 'wb') as f:
             f.write(res)
             
-        pil_img = Image.open(temp_img_path).convert('RGB')
+        pil_img = Image.open(local_img_path).convert('RGB')
+        
+        # KEEP in Supabase so frontend/mobile app can view it!
+        # try:
+        #     supabase.storage.from_('reports').remove([image_path])
+        #     print(f"    🗑️ Deleted {image_path} from Supabase Storage")
+        # except Exception as e:
+        #     print(f"    ⚠️ Could not delete from Supabase: {e}")
+            
     except Exception as e:
         print(f"    ❌ Failed to download or read image: {e}")
         supabase.table('reports').update({"status": "failed"}).eq("id", report['id']).execute()
@@ -193,12 +226,22 @@ def process_report(report):
 
     # 3. Push results back and complete the workflow
     print("    📤 Updating Database...")
+    
+    update_payload = {
+        "status": "pending",
+        "issue_type": detected_type,
+        "ai_predictions": json.dumps(predictions),
+        "image_path": f"uploads/images/{filename}" # Update DB to point to local server path
+    }
+
+    if not report.get('village_name') and report.get('latitude') and report.get('longitude'):
+        v_name = get_village_name(report['latitude'], report['longitude'])
+        if v_name:
+            print(f"    📍 Matched coordinates to village: {v_name}")
+            update_payload['village_name'] = v_name
+
     try:
-        supabase.table('reports').update({
-            "status": "completed",
-            "issue_type": detected_type,
-            "ai_predictions": json.dumps(predictions)
-        }).eq("id", report['id']).execute()
+        supabase.table('reports').update(update_payload).eq("id", report['id']).execute()
     except Exception as e:
         print(f"    ❌ Database update failed: {e}")
         return
@@ -303,14 +346,15 @@ def load_junction_cells():
     """
     try:
         url = "https://overpass-api.de/api/interpreter"
-        data = urllib.request.urlopen(
-            urllib.request.Request(
-                url,
-                data=query.encode('utf-8'),
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            ),
-            timeout=60
-        ).read()
+        req = urllib.request.Request(
+            url,
+            data=f"data={urllib.parse.quote(query)}".encode('utf-8'),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+        )
+        data = urllib.request.urlopen(req, timeout=60).read()
         osm = json.loads(data)
 
         cells = set()
@@ -363,8 +407,27 @@ def process_sensors(batch):
         else:
             print(f"    ⬇️ Downloading {file_path} from Storage...")
             res = supabase.storage.from_('reports').download(file_path)
+            
+            # Save JSON permanently to local server storage
+            local_dir = os.path.join(BASE_DIR, 'uploads', 'sensors')
+            os.makedirs(local_dir, exist_ok=True)
+            filename = os.path.basename(file_path)
+            local_json_path = os.path.join(local_dir, filename)
+            
+            with open(local_json_path, 'wb') as f:
+                f.write(res)
+                
             payload = json.loads(res.decode('utf-8'))
             readings = payload.get('readings', [])
+            
+            # Immediately delete from Supabase
+            try:
+                supabase.storage.from_('reports').remove([file_path])
+                print(f"    🗑️ Deleted {file_path} from Supabase Storage")
+                # Update DB to point to local path
+                supabase.table('sensors').update({"local_file_path": f"uploads/sensors/{filename}"}).eq("id", batch['id']).execute()
+            except Exception as e:
+                print(f"    ⚠️ Could not delete from Supabase: {e}")
             
         print(f"    📊 Loaded {len(readings)} sensor samples into RAM")
     except Exception as e:
@@ -622,6 +685,9 @@ def process_sensors(batch):
                         if sw_hits >= 3 and cl_hits < 3:
                             final_label = 'OBSTACLE'
 
+                    existing = existing_map.get(seg_id)
+                    v_name = existing.get('village_name') if existing and existing.get('village_name') else get_village_name(snapped_lat, snapped_lng)
+                    
                     segments_to_upsert.append({
                         "segment_id": seg_id,
                         "latitude": sf(snapped_lat),
@@ -633,7 +699,8 @@ def process_sensors(batch):
                         "swerving_hits": int(sw_hits),
                         "clear_hits": int(cl_hits),
                         "session_hits": sess_hits,
-                        "last_updated": now_iso
+                        "last_updated": now_iso,
+                        "village_name": v_name
                     })
                 
                 # Tiny Chunk Upsert
@@ -656,9 +723,8 @@ def process_sensors(batch):
                 print("    ------------------------\n")
                 
         print(f"    Batch processed successfully.")
-  print(f"    Batch processed successfully.")
->>>>>>> d52475d (Finalize spatial telemetry pipeline, avoidance logic, and government dashboard integration)
         
+
     except Exception as e:
         print(f"    ❌ Critical Error: {e}")
         if not batch.get('id', '').startswith('local_import_'):
@@ -698,12 +764,12 @@ if __name__ == "__main__":
     while True:
         try:
             # Check active Reports (Camera images)
-            pending_reports = supabase.table('reports').select('*').eq('status', 'pending').limit(1).execute()
+            pending_reports = supabase.table('reports').select('*').ilike('status', 'new').limit(1).execute()
             for r in pending_reports.data:
                 process_report(r)
 
             # Check active Sensors (JSON Telemetry)
-            pending_sensors = supabase.table('sensors').select('*').eq('status', 'pending').limit(1).execute()
+            pending_sensors = supabase.table('sensors').select('*').ilike('status', 'pending').limit(1).execute()
             for s in pending_sensors.data:
                 process_sensors(s)
 

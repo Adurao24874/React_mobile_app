@@ -80,3 +80,7 @@
     line-height: inherit;
   }
 }
+
+.pb-safe {
+  padding-bottom: calc(0.5rem + env(safe-area-inset-bottom)) !important;
+}

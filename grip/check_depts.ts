@@ -1,0 +1,12 @@
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = 'https://ytmuudbkuhkfqkzchtce.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_DF1cQCw9e1eefh2b3y3gtA_OIUyZsem'; 
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+async function run() {
+    const { data } = await supabase.from('departments').select('id, department_name, contact_email, taluka_name').ilike('department_name', '%Socorro%');
+    console.log(data);
+}
+run();
