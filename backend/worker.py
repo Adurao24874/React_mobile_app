@@ -230,8 +230,7 @@ def process_report(report):
     update_payload = {
         "status": "pending",
         "issue_type": detected_type,
-        "ai_predictions": json.dumps(predictions),
-        "image_path": f"uploads/images/{filename}" # Update DB to point to local server path
+        "ai_predictions": json.dumps(predictions)
     }
 
     if not report.get('village_name') and report.get('latitude') and report.get('longitude'):

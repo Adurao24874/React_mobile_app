@@ -69,7 +69,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"from\": \"GRIP Updates <alerts@grip-goa.online>\",\n  \"to\": [\"{{ $json.body.record.user_email }}\"],\n  \"subject\": \"Update: Your GRIP Report has been Resolved!\",\n  \"html\": \"<p>Great news,</p><p>The infrastructure issue (Report #{{ $json.body.record.id }}) you submitted has been officially marked as <b>Resolved</b> by the local authorities.</p><p>Thank you for helping improve our community. You can log in to the GRIP Dashboard to view the final details and any resolution photos provided by the field team.</p>\"\n}",
+        "jsonBody": "={\n  \"from\": \"onboarding@resend.dev\",\n  \"to\": [\"gaonkaradarsh38@gmail.com\"],\n  \"subject\": \"Update: Your GRIP Report has been Resolved!\",\n  \"html\": \"<p>Great news,</p><p>The infrastructure issue (Report #{{ $json.body.record.id }}) you submitted has been officially marked as <b>Resolved</b> by the local authorities.</p><p>Thank you for helping improve our community. You can log in to the GRIP Dashboard to view the final details and any resolution photos provided by the field team.</p>\"\n}\n",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -112,7 +112,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "83537143-f053-4c7a-b530-c6ed6e5afadc",
+  "versionId": "1a608332-9856-4ff8-8cc1-1217c6332c92",
   "meta": {
     "instanceId": "941b6de2e7fc8454613dec48b10b1cb7763875a6746c1034d4db0f4696bea4b6"
   },

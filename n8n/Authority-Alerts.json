@@ -13,7 +13,7 @@
         0,
         0
       ],
-      "id": "dc19b8dd-a975-41f7-99a1-e3d24ee51b4d",
+      "id": "3e4b5d80-8f49-4fa8-a652-f8681e4354e2",
       "name": "Webhook",
       "webhookId": "933e402a-6a20-43f4-9c57-46f54e5b6c9c"
     },
@@ -29,7 +29,7 @@
         208,
         0
       ],
-      "id": "eda9b00c-63cb-486c-9e73-3531c209cf45",
+      "id": "9dfea5da-7334-4c3f-b7fe-d17c80d29be2",
       "name": "Execute a SQL query",
       "credentials": {
         "postgres": {
@@ -49,17 +49,13 @@
         },
         "table": {
           "__rl": true,
-          "value": "work_orders",
-          "mode": "list",
-          "cachedResultName": "work_orders"
+          "value": "=work_orders",
+          "mode": "name"
         },
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "department_id": 0,
-            "escalation_level": 0,
-            "id": "={{ $('Webhook').item.json.body.record.id }}",
-            "report_id": "=",
+            "id": "={{ $('Webhook').first().json.body.record.id }}",
             "worker_id": "={{ $node[\"Execute a SQL query\"].json[\"worker_id\"] }}",
             "status": "Dispatched"
           },
@@ -84,7 +80,8 @@
               "defaultMatch": false,
               "display": true,
               "type": "number",
-              "canBeUsedToMatch": true
+              "canBeUsedToMatch": true,
+              "removed": true
             },
             {
               "id": "department_id",
@@ -93,7 +90,8 @@
               "defaultMatch": false,
               "display": true,
               "type": "number",
-              "canBeUsedToMatch": true
+              "canBeUsedToMatch": true,
+              "removed": true
             },
             {
               "id": "worker_id",
@@ -138,7 +136,8 @@
               "defaultMatch": false,
               "display": true,
               "type": "number",
-              "canBeUsedToMatch": true
+              "canBeUsedToMatch": true,
+              "removed": true
             },
             {
               "id": "resolution_image_url",
@@ -161,7 +160,7 @@
         832,
         0
       ],
-      "id": "da7f1673-110e-4714-ba55-76eb281a039b",
+      "id": "7c328e44-e1ad-406a-a06b-46dd1d436909",
       "name": "Update rows in a table",
       "credentials": {
         "postgres": {
@@ -194,7 +193,7 @@
         624,
         0
       ],
-      "id": "cc17013b-eeeb-448f-9d52-81cc4b590433",
+      "id": "2e3e2615-b93b-41e1-a378-687cee38c32f",
       "name": "HTTP Request"
     },
     {
@@ -209,7 +208,7 @@
         416,
         0
       ],
-      "id": "5daad918-51f9-47f1-89d5-013f7377fc79",
+      "id": "4a63d4eb-83f0-4c6c-93a1-0ad0400ef13f",
       "name": "Execute a SQL query1",
       "credentials": {
         "postgres": {
@@ -271,11 +270,10 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "622d3297-3b72-4e91-b945-1b67e17aebac",
+  "versionId": "35084e50-d945-4543-8da9-f914e7fc85d3",
   "meta": {
-    "templateCredsSetupCompleted": true,
     "instanceId": "941b6de2e7fc8454613dec48b10b1cb7763875a6746c1034d4db0f4696bea4b6"
   },
-  "id": "EDGLEzzpEMoDObeH",
+  "id": "WoZrygNX4jm3pHUK",
   "tags": []
 }
