@@ -106,7 +106,7 @@ class AudioWarningServiceClass {
             for (const [key, filename] of Object.entries(HAZARD_AUDIO_FILES)) {
                 await NativeAudio.preload({
                     assetId: key.toLowerCase(),
-                    assetPath: `audio/${filename}`,
+                    assetPath: Capacitor.getPlatform() === 'android' ? `public/audio/${filename}` : `audio/${filename}`,
                     audioChannelNum: 1,
                     isUrl: false
                 });

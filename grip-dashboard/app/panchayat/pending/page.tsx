@@ -37,6 +37,7 @@ interface PendingReport {
   worker_name?: string;
   hours_remaining?: number;
   risk_status?: string;
+  is_my_territory?: boolean;
 }
 
 // THE SMART ROUTER: Multi-Department Escalation Modal
@@ -387,14 +388,19 @@ export default function PendingPage() {
 
   const fetchReports = () => {
     setLoading(true);
-    fetch("/api/dashboard")
+    // 1. Point to the smart API that knows who the logged-in Secretary is
+    fetch("/api/panchayat/dashboard")
       .then((res) => res.json())
       .then((json) => {
         if (json.success) {
-          const fetchedData = json.reports || json.tasks || [];
+          // 2. Read from json.tickets (which our API outputs)
+          const fetchedData = json.tickets || [];
 
-          // 1. The Domain Filter: Only keep rows that are Active AND related to Waste
+          // 3. The Domain Filter: Only keep rows that are Active, Waste, AND MINE
           const activeTickets = fetchedData.filter((r: PendingReport) => {
+            // IF IT DOESN'T BELONG TO MY VILLAGE, THROW IT OUT IMMEDIATELY
+            if (!r.is_my_territory) return false;
+
             // Condition A: It must NOT be resolved/completed
             const isPending =
               r.status?.toLowerCase() !== "resolved" &&
@@ -413,7 +419,7 @@ export default function PendingPage() {
             return isPending && isWasteRelated;
           });
 
-          // 2. Sort by SLA Risk (Highest priority on top)
+          // 4. Sort by SLA Risk
           activeTickets.sort((a: PendingReport, b: PendingReport) => {
             const getScore = (status?: string) => {
               if (status === "Breached") return 3;
@@ -527,7 +533,7 @@ export default function PendingPage() {
                     >
                       <td className="p-5">
                         <span className="font-bold text-slate-800 capitalize">
-                          {report.issue_type.replace(/_/g, " ")}
+                          {(report.issue_type || 'unclassified_hazard').replace(/_/g, " ")}
                         </span>
                       </td>
                       <td className="p-5">

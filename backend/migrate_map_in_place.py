@@ -71,17 +71,16 @@ def load_junction_cells():
     out geom;
     """
     try:
-        url = "https://overpass-api.de/api/interpreter"
-        req = urllib.request.Request(
-            url,
-            data=f"data={urllib.parse.quote(query)}".encode('utf-8'),
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
+        import requests
+        url = "https://lz4.overpass-api.de/api/interpreter"
+        resp = requests.post(
+            url, 
+            data={'data': query}, 
+            headers={'User-Agent': 'GripMobapp/1.0', 'Accept': 'application/json'},
+            timeout=60
         )
-        data = urllib.request.urlopen(req, timeout=60).read()
-        osm = json.loads(data)
+        resp.raise_for_status()
+        osm = resp.json()
 
         cells = set()
         for element in osm.get('elements', []):

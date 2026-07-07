@@ -17,11 +17,16 @@ import { NativeSettings, AndroidSettings } from 'capacitor-native-settings';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { ForegroundService } from '@capawesome-team/capacitor-android-foreground-service';
 import { KeepAwake } from '@capacitor-community/keep-awake';
+import { SecureStoragePlugin } from 'capacitor-secure-storage-plugin';
 import type { BackgroundGeolocationPlugin } from '@capacitor-community/background-geolocation';
 
 const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
-import GovernmentDashboard from './components/GovernmentDashboard';
+import PWDDashboard from './components/PWDDashboard';
 import PanchayatDashboard from './components/PanchayatDashboard';
+import BDODashboard from './components/BDODashboard';
+import HealthDashboard from './components/HealthDashboard';
+import GWMCDashboard from './components/GWMCDashboard';
+import GovernmentDashboard from './components/GovernmentDashboard';
 
 const CURRENT_APP_VERSION = "v1.1.0";
 
@@ -219,45 +224,7 @@ export function DynamicMapLayers({ conditions, reports, showSensors, showReports
     );
 }
 
-function Home() {
-    return (
-        <div className="flex flex-col items-center justify-center min-h-screen p-4 bg-gradient-to-b from-teal-500 to-blue-600">
-            <div className="w-full max-w-md p-8 bg-white/10 backdrop-blur-md rounded-3xl shadow-2xl border border-white/20 text-center">
-                <div className="mx-auto w-24 h-24 bg-white rounded-full flex items-center justify-center shadow-lg mb-6">
-                    <span className="text-4xl text-red-500"><img src="https://img.icons8.com/?size=100&id=102551&format=png&color=000000" alt="Shield" className="w-12 h-12" /></span>
-                </div>
-                <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">GRIP</h1>
-                <p className="text-white/80 mb-10 whitespace-pre-line text-lg">
-                    Goa Real-time
-                    Infrastructure Protection
-                </p>
-                
-                <div className="space-y-4">
-                    <Link
-                        to="/login"
-                        className="flex items-center justify-center gap-2 w-full py-4 bg-white text-teal-600 font-bold rounded-full text-lg shadow-lg hover:bg-gray-50 transition-all active:scale-95"
-                    >
-                        <span className="w-4 h-4 rounded-full bg-teal-500 mr-2 inline-block animate-pulse"></span>
-                        Citizen Portal
-                    </Link>
-
-                    <Link
-                        to="/gov-login"
-                        className="flex items-center justify-center gap-2 w-full py-4 bg-blue-900/40 text-white font-bold rounded-full text-lg shadow-lg border border-white/20 hover:bg-blue-900/60 transition-all active:scale-95"
-                    >
-                        <span>🏛️</span>
-                        Government Access
-                    </Link>
-                </div>
-
-                <div className="mt-10 text-white/70 text-sm">
-                    <p>Protecting Goa's Infrastructure in Real Time</p>
-                    <p className="mt-2 text-xs">🛣️ Roads • 🌴 Trees • 🌊 Coastline</p>
-                </div>
-            </div>
-        </div>
-    );
-}
+// Home component removed to default to Citizen Login
 
 function GovLogin() {
     const navigate = useNavigate();
@@ -265,7 +232,18 @@ function GovLogin() {
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const [errorMsg, setErrorMsg] = useState('');
+    const [rememberMe, setRememberMe] = useState(false);
 
+    useEffect(() => {
+        const loadSaved = () => {
+            const savedEmail = localStorage.getItem('saved_gov_email');
+            if (savedEmail) {
+                setEmail(savedEmail);
+                setRememberMe(true);
+            }
+        };
+        loadSaved();
+    }, []);
 
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -277,8 +255,10 @@ function GovLogin() {
             try {
                 const { error } = await supabase.auth.signInWithPassword({ email, password });
                 if (error) {
-                    const { data } = await supabase.from('departments').select('contact_email').eq('contact_email', email.toLowerCase()).limit(1);
-                    if (data && data.length > 0) {
+                    const { data: deptData } = await supabase.from('departments').select('contact_email').eq('contact_email', email.toLowerCase()).limit(1);
+                    const { data: workerData } = await supabase.from('field_workers').select('email').ilike('email', email.toLowerCase()).limit(1);
+                    
+                    if ((deptData && deptData.length > 0) || (workerData && workerData.length > 0)) {
                         console.warn("Auth bypassed based on DB presence for testing.");
                         authSuccess = true;
                     } else {
@@ -289,8 +269,10 @@ function GovLogin() {
                 }
             } catch (authErr: any) {
                 if (authErr.message === "Email not found in database.") throw authErr;
-                const { data } = await supabase.from('departments').select('contact_email').eq('contact_email', email.toLowerCase()).limit(1);
-                if (data && data.length > 0) {
+                const { data: deptData } = await supabase.from('departments').select('contact_email').eq('contact_email', email.toLowerCase()).limit(1);
+                const { data: workerData } = await supabase.from('field_workers').select('email').ilike('email', email.toLowerCase()).limit(1);
+                
+                if ((deptData && deptData.length > 0) || (workerData && workerData.length > 0)) {
                     console.warn("Auth bypassed based on DB presence for testing.");
                     authSuccess = true;
                 } else {
@@ -301,6 +283,12 @@ function GovLogin() {
             if (!authSuccess) {
                 throw new Error("Authentication failed");
             }
+            
+            if (rememberMe) {
+                localStorage.setItem('saved_gov_email', email);
+            } else {
+                localStorage.removeItem('saved_gov_email');
+            }
 
             localStorage.setItem('user_mode', 'government');
             localStorage.setItem('gov_email', email);
@@ -310,13 +298,34 @@ function GovLogin() {
             let dest = localStorage.getItem('direct_redirect');
             if (!dest || dest === '/gov-dashboard') {
                 try {
-                    const { data } = await supabase.from('departments').select('department_type').eq('contact_email', targetEmail).limit(1);
-                    if (data && data.length > 0 && data[0].department_type) {
-                        const type = data[0].department_type.toUpperCase();
+                    const { data: deptData } = await supabase.from('departments').select('department_type').eq('contact_email', targetEmail).limit(1);
+                    
+                    let type = null;
+                    if (deptData && deptData.length > 0 && deptData[0].department_type) {
+                        type = deptData[0].department_type.toUpperCase();
+                    } else {
+                        const { data: workerData } = await supabase.from('field_workers').select('specialty').ilike('email', targetEmail).limit(1);
+                        if (workerData && workerData.length > 0) {
+                            const specialty = workerData[0].specialty?.toUpperCase() || '';
+                            if (specialty.includes('SANITATION') || specialty.includes('WASTE')) {
+                                type = 'PANCHAYAT';
+                            } else {
+                                type = 'PWD';
+                            }
+                        }
+                    }
+
+                    if (type) {
                         if (type.includes('PWD')) {
                             dest = '/gov/pwd';
                         } else if (type.includes('PANCHAYAT') || type.includes('MUNICIPAL')) {
                             dest = '/gov/panchayat';
+                        } else if (type.includes('BDO')) {
+                            dest = '/gov/bdo';
+                        } else if (type.includes('HEALTH')) {
+                            dest = '/gov/health';
+                        } else if (type.includes('GWMC') || type.includes('SWMF')) {
+                            dest = '/gov/gwmc';
                         } else {
                             dest = '/gov/pwd';
                         }
@@ -340,17 +349,16 @@ function GovLogin() {
         <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-4">
             <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
                 <div className="mb-8 text-center">
-                    <h1 className="text-3xl font-black text-slate-900 tracking-tight leading-none mb-2">GRIP</h1>
-                    <p className="text-slate-500 font-medium text-sm">Unified Government Access Portal</p>
+                    <h1 className="text-3xl font-black text-slate-900 tracking-tight">GRIP</h1>
+                    <p className="text-slate-500 font-medium mt-1">Unified Government Access Portal</p>
                 </div>
 
                 {errorMsg && (
-                    <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold flex items-center gap-2">
-                        <span>⚠️</span> {errorMsg}
+                    <div className="mb-6 p-3 bg-rose-50 border border-rose-200 text-rose-600 text-sm font-bold rounded-lg text-center">
+                        {errorMsg}
                     </div>
                 )}
 
-                {/* Dummy Login Form (Matches Web UI) */}
                 <form onSubmit={handleAuth} className="space-y-5">
                     <div>
                         <label className="block text-sm font-bold text-slate-700 mb-1">Official Email</label>
@@ -358,8 +366,8 @@ function GovLogin() {
                             type="email" 
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
-                            className="w-full px-4 py-3 rounded-lg border border-slate-300 text-slate-800 focus:border-blue-500 outline-none transition-all"
-                            placeholder="admin.mopa@grip.local"
+                            className="w-full px-4 py-3 rounded-lg border border-slate-300 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            placeholder="worker@grip-goa.online"
                             required
                         />
                     </div>
@@ -369,64 +377,48 @@ function GovLogin() {
                             type="password" 
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
-                            className="w-full px-4 py-3 rounded-lg border border-slate-300 text-slate-800 focus:border-blue-500 outline-none transition-all"
+                            className="w-full px-4 py-3 rounded-lg border border-slate-300 text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                             placeholder="••••••••"
                             required
                         />
                     </div>
+                    
+                    <div className="flex items-center mt-2">
+                        <input
+                            type="checkbox"
+                            id="rememberGovMe"
+                            checked={rememberMe}
+                            onChange={(e) => setRememberMe(e.target.checked)}
+                            className="w-4 h-4 text-indigo-600 bg-gray-100 border-gray-300 rounded focus:ring-indigo-500 focus:ring-2"
+                        />
+                        <label htmlFor="rememberGovMe" className="ml-2 text-sm font-medium text-slate-700">
+                            Remember my email
+                        </label>
+                    </div>
+
                     <button 
                         type="submit" 
                         disabled={loading}
-                        className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 px-4 rounded-lg transition-all active:scale-95 disabled:opacity-50"
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center shadow-md"
                     >
-                        {loading ? 'Authenticating...' : 'Secure Login'}
+                        {loading ? (
+                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        ) : (
+                            "Secure Login"
+                        )}
                     </button>
                 </form>
 
-                {/* DEVELOPMENT BYPASS BUTTONS (Matches Web UI) */}
-                <div className="mt-8 pt-6 border-t border-slate-200">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center mb-4">
-                        Direct Access
-                    </p>
-                    <div className="space-y-3">
-                        <button 
-                            onClick={() => { 
-                                localStorage.setItem('user_mode', 'government');
-                                localStorage.removeItem('gov_email');
-                                window.dispatchEvent(new Event('auth-change'));
-                                navigate('/gov/pwd');
-                            }}
-                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-xl flex justify-between items-center transition-all shadow-lg active:scale-95"
-                        >
-                            <span className="text-sm font-black uppercase tracking-tight">🗺️ PWD Master</span>
-                            <ArrowRight className="w-4 h-4" />
-                        </button>
-
-                        <button 
-                            onClick={() => { 
-                                localStorage.setItem('user_mode', 'government');
-                                localStorage.removeItem('gov_email');
-                                window.dispatchEvent(new Event('auth-change'));
-                                navigate('/gov/panchayat');
-                            }}
-                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 px-6 rounded-xl flex justify-between items-center transition-all shadow-lg active:scale-95"
-                        >
-                            <span className="text-sm font-black uppercase tracking-tight">🗑️ Panchayat Master</span>
-                            <ArrowRight className="w-4 h-4" />
-                        </button>
-                    </div>
-                </div>
-
                 <div className="mt-6 text-center">
                     <Link 
-                        to="/" 
+                        to="/login" 
                         onClick={() => {
                             localStorage.removeItem('user_mode');
                             window.dispatchEvent(new Event('auth-change'));
                         }}
                         className="text-xs font-bold text-slate-400 hover:text-slate-600 uppercase tracking-widest transition-colors"
                     >
-                        ← Back to Public
+                        ← Citizen Access
                     </Link>
                 </div>
             </div>
@@ -443,6 +435,18 @@ function Login() {
     const [isSignUp, setIsSignUp] = useState(false);
     const [loading, setLoading] = useState(false);
     const [errorMsg, setErrorMsg] = useState('');
+    const [rememberMe, setRememberMe] = useState(false);
+
+    useEffect(() => {
+        const loadSaved = () => {
+            const savedEmail = localStorage.getItem('saved_user_email');
+            if (savedEmail) {
+                setEmail(savedEmail);
+                setRememberMe(true);
+            }
+        };
+        loadSaved();
+    }, []);
 
     const handleAuth = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -459,6 +463,13 @@ function Login() {
             } else {
                 const { error } = await supabase.auth.signInWithPassword({ email, password });
                 if (error) throw error;
+                
+                if (rememberMe) {
+                    localStorage.setItem('saved_user_email', email);
+                } else {
+                    localStorage.removeItem('saved_user_email');
+                }
+                
                 localStorage.removeItem('user_mode');
                 window.dispatchEvent(new Event('auth-change'));
                 navigate('/dashboard');
@@ -526,6 +537,21 @@ function Login() {
                             minLength={6}
                         />
                     </div>
+                    
+                    {!isSignUp && (
+                        <div className="flex items-center mt-2">
+                            <input
+                                type="checkbox"
+                                id="rememberMe"
+                                checked={rememberMe}
+                                onChange={(e) => setRememberMe(e.target.checked)}
+                                className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-zinc-700 dark:border-gray-600"
+                            />
+                            <label htmlFor="rememberMe" className="ml-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                                Remember my email
+                            </label>
+                        </div>
+                    )}
 
                     <button
                         type="submit"
@@ -748,7 +774,7 @@ function GuideMe() {
 
             <div className="flex-1 relative">
                 <div className="absolute inset-0 z-0">
-                    <MapContainer center={loc ? [loc.lat, loc.lng] : [15.4909, 73.8278]} zoom={16} className="w-full h-full" zoomControl={false} attributionControl={false}>
+                    <MapContainer preferCanvas={true} center={loc ? [loc.lat, loc.lng] : [15.4909, 73.8278]} zoom={16} className="w-full h-full" zoomControl={false} attributionControl={false}>
                         <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
                         <DynamicMapLayers
                             conditions={segments}
@@ -880,7 +906,15 @@ function Dashboard() {
 
     const handleSignOut = async () => {
         await supabase.auth.signOut();
-        localStorage.removeItem('user_mode');
+        const savedUserEmail = localStorage.getItem('saved_user_email');
+        const savedGovEmail = localStorage.getItem('saved_gov_email');
+        
+        localStorage.clear();
+        
+        // Restore remembered emails
+        if (savedUserEmail) localStorage.setItem('saved_user_email', savedUserEmail);
+        if (savedGovEmail) localStorage.setItem('saved_gov_email', savedGovEmail);
+        
         window.dispatchEvent(new Event('auth-change'));
         navigate('/login');
     };
@@ -994,7 +1028,7 @@ function ReportGarbage() {
                 allowEditing: false,
                 // 1. Change the result type to return raw Base64 data instead of a temporary URI
                 resultType: CameraResultType.Base64,
-                source: CameraSource.Camera
+                source: CameraSource.Prompt
             });
 
             if (image.base64String) {
@@ -1086,6 +1120,7 @@ function ReportGarbage() {
 function PotholeDetection() {
     const navigate = useNavigate();
     const [isRecording, setIsRecording] = useState(false);
+    const [vehicleType, setVehicleType] = useState('2_wheeler');
     const [currentLocation, setCurrentLocation] = useState<{ lat: number, lng: number, accuracy: number } | null>(null);
     const [sampleCount, setSampleCount] = useState(0);
     const [uploadStatus, setUploadStatus] = useState<'idle' | 'saving' | 'success' | 'failed'>('idle');
@@ -1099,6 +1134,12 @@ function PotholeDetection() {
     const sessionRef = useRef<string | null>(null);
     const totalSamplesRef = useRef<number>(0);
     const regionMapRef = useRef<any>({});
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+
+    useEffect(() => {
+        audioRef.current = new Audio('/silent.wav');
+        audioRef.current.loop = true;
+    }, []);
 
     // 🧠 REGION STORAGE HELPERS
     const mapToRegion = (lat: number, lng: number, cellSize: number = 0.00001) => {
@@ -1130,68 +1171,68 @@ function PotholeDetection() {
 
     const setupMonitoringListeners = async () => {
         if (typeof (DeviceMotionEvent as any).requestPermission === 'function') await (DeviceMotionEvent as any).requestPermission();
-        const watcherId = await BackgroundGeolocation.addWatcher({ backgroundMessage: "Tracking road quality", backgroundTitle: "GRIP Recording", requestPermissions: false, stale: false, distanceFilter: 0 }, (position) => {
+        
+        if (saveIntervalRef.current) clearInterval(saveIntervalRef.current);
+        saveIntervalRef.current = null;
+
+        const watcherId = await BackgroundGeolocation.addWatcher({ backgroundMessage: "Tracking road quality", backgroundTitle: "GRIP Recording", requestPermissions: false, stale: false, distanceFilter: 0 }, async (position) => {
             if (position) {
                 const loc = { lat: position.latitude, lng: position.longitude, accuracy: position.accuracy };
                 latestLocationRef.current = loc;
                 setCurrentLocation(loc);
-            }
-        });
-        geoWatchId.current = watcherId;
 
-        if (saveIntervalRef.current) clearInterval(saveIntervalRef.current);
-        saveIntervalRef.current = setInterval(async () => {
-            if (Capacitor.getPlatform() === 'android') {
-                const latestLoc = latestLocationRef.current;
-                if (latestLoc && !isInGoa(latestLoc.lat, latestLoc.lng)) {
-                    alert("You have left the permitted recording region (Goa). Data collection has been stopped automatically.");
-                    stopMonitoring();
-                    return;
-                }
+                if (Capacitor.getPlatform() === 'android') {
+                    if (!isInGoa(loc.lat, loc.lng)) {
+                        alert("You have left the permitted recording region (Goa). Data collection has been stopped automatically.");
+                        stopMonitoring();
+                        return;
+                    }
 
-                const stats = await GripSensor.getReadings();
-                if (stats.readings && stats.readings.length > 0) {
-                    const latest = stats.readings[stats.readings.length - 1];
-                    setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
-                    setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
+                    const stats = await GripSensor.getReadings();
+                    if (stats.readings && stats.readings.length > 0) {
+                        const latest = stats.readings[stats.readings.length - 1];
+                        setLiveAccel({ x: latest.accelX, y: latest.accelY, z: latest.accelZ });
+                        setLiveGyro({ x: latest.gyroX, y: latest.gyroY, z: latest.gyroZ });
 
-                    const canTagGps = !!latestLoc && latestLoc.accuracy <= 300 && isInGoa(latestLoc.lat, latestLoc.lng);
-                    const normalizedReadings = stats.readings.map((r: any) => {
-                        const hasNativeGps = r.lat !== 0 && r.lat !== undefined;
-                        return {
-                            ...r,
-                            lat: hasNativeGps ? r.lat : (canTagGps ? latestLoc.lat : r.lat),
-                            lng: hasNativeGps ? r.lng : (canTagGps ? latestLoc.lng : r.lng),
-                            session_id: sessionRef.current
-                        };
-                    });
+                        const canTagGps = loc.accuracy <= 300;
+                        const normalizedReadings = stats.readings.map((r: any) => {
+                            const hasNativeGps = r.lat !== 0 && r.lat !== undefined;
+                            return {
+                                ...r,
+                                lat: hasNativeGps ? r.lat : (canTagGps ? loc.lat : r.lat),
+                                lng: hasNativeGps ? r.lng : (canTagGps ? loc.lng : r.lng),
+                                session_id: sessionRef.current
+                            };
+                        });
 
-                    // 🧠 STEP 2: Store readings into regions for intelligence
-                    normalizedReadings.forEach((reading: any) => {
-                        if (reading.lat && reading.lng) {
-                            const region = mapToRegion(reading.lat, reading.lng);
-                            updateRegion(region.x, region.y, { lat: reading.lat, lng: reading.lng }, reading.accelZ);
+                        // 🧠 STEP 2: Store readings into regions for intelligence
+                        normalizedReadings.forEach((reading: any) => {
+                            if (reading.lat && reading.lng) {
+                                const region = mapToRegion(reading.lat, reading.lng);
+                                updateRegion(region.x, region.y, { lat: reading.lat, lng: reading.lng }, reading.accelZ);
+                            }
+                        });
+
+                        // CRITICAL: Accumulate readings so we don't lose them!
+                        batchRef.current = [...batchRef.current, ...normalizedReadings];
+                        totalSamplesRef.current += normalizedReadings.length;
+                        setSampleCount(totalSamplesRef.current);
+
+                        // Periodically chunk and send in background every 3000 samples
+                        if (batchRef.current.length >= 3000) {
+                            const chunkToSave = batchRef.current.splice(0, 3000);
+                            StorageService.saveSensorBatch({ readings: chunkToSave }).then(() => {
+                                SyncEngine.syncAll();
+                            }).catch(e => console.error("Continuous sync failed:", e));
+                        } else if (batchRef.current.length % 500 === 0 && batchRef.current.length > 0) {
+                            // Periodically backup to local storage for crash recovery
+                            StorageService.saveActiveSession(batchRef.current);
                         }
-                    });
-
-                    // CRITICAL: Accumulate readings so we don't lose them!
-                    batchRef.current = [...batchRef.current, ...normalizedReadings];
-                    totalSamplesRef.current += normalizedReadings.length;
-                    setSampleCount(totalSamplesRef.current);
-
-                    // Periodically chunk and send in background every 3000 samples
-                    if (batchRef.current.length >= 3000) {
-                        const chunkToSave = batchRef.current.splice(0, 3000);
-                        StorageService.saveSensorBatch({ readings: chunkToSave }).then(() => {
-                            SyncEngine.syncAll();
-                        }).catch(e => console.error("Continuous sync failed:", e));
-                    } else if (batchRef.current.length % 500 === 0 && batchRef.current.length > 0) {
-                        // Periodically backup to local storage for crash recovery
-                        StorageService.saveActiveSession(batchRef.current);
                     }
                 }
             }
-        }, 1000);
+        });
+        geoWatchId.current = watcherId;
     };
 
     useEffect(() => {
@@ -1248,6 +1289,9 @@ function PotholeDetection() {
             sessionRef.current = 'session_' + Date.now().toString();
             setSampleCount(0);
             if (Capacitor.getPlatform() === 'android') await GripSensor.startRecording();
+            if (audioRef.current) {
+                audioRef.current.play().catch(e => console.warn("Audio hack blocked:", e));
+            }
             setIsRecording(true);
             await setupMonitoringListeners();
         } catch (e: any) { alert(`Error: ${e.message}`); setIsRecording(false); }
@@ -1286,6 +1330,9 @@ function PotholeDetection() {
             await BackgroundGeolocation.removeWatcher({ id: geoWatchId.current });
             geoWatchId.current = null;
         }
+        if (audioRef.current) {
+            audioRef.current.pause();
+        }
         setShowSavePrompt(true);
     };
 
@@ -1309,7 +1356,7 @@ function PotholeDetection() {
             </div>
             <div className="p-6 space-y-6">
                 <div className="relative w-full h-72 rounded-3xl overflow-hidden shadow-sm bg-zinc-800 z-0">
-                    <MapContainer center={currentLocation ? [currentLocation.lat, currentLocation.lng] : [15.4909, 73.8278]} zoom={17} style={{ height: '100%', width: '100%' }} zoomControl={false} attributionControl={false}>
+                    <MapContainer preferCanvas={true} center={currentLocation ? [currentLocation.lat, currentLocation.lng] : [15.4909, 73.8278]} zoom={17} style={{ height: '100%', width: '100%' }} zoomControl={false} attributionControl={false}>
                         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                         {currentLocation && <Marker position={[currentLocation.lat, currentLocation.lng]} icon={blueDotIcon} />}
                         <LiveMapUpdater position={currentLocation} />
@@ -1332,12 +1379,26 @@ function PotholeDetection() {
                         <p className="text-sm font-bold">{uploadStatus === 'saving' ? 'Syncing...' : (uploadStatus === 'success' ? 'Data Uploaded!' : 'Sync Failed')}</p>
                     </div>
                 )}
+                
+                <div className="bg-white dark:bg-zinc-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-700">
+                    <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Vehicle Type</h3>
+                    <select 
+                        value={vehicleType} 
+                        onChange={(e) => setVehicleType(e.target.value)}
+                        disabled={isRecording}
+                        className="w-full p-3 rounded-xl bg-gray-50 dark:bg-zinc-900 border border-gray-200 dark:border-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                        <option value="2_wheeler">2-Wheeler (Bike / Scooter)</option>
+                        <option value="4_wheeler">4-Wheeler (Car / Bus)</option>
+                    </select>
+                </div>
+
                 <div className="flex justify-between px-2 text-xs font-medium text-gray-500"><span>Samples</span><span className="font-mono">{sampleCount}</span></div>
                 <button onClick={isRecording ? stopMonitoring : startMonitoring} className={`w-full py-5 text-white font-bold rounded-2xl ${isRecording ? 'bg-red-500' : 'bg-gradient-to-r from-green-500 to-blue-600'}`}>
                     {isRecording ? 'Stop Recording' : 'Start Recording'}
                 </button>
                 {showSavePrompt && (
-                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"><div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl w-full max-w-sm space-y-4 shadow-xl text-center"><h3 className="text-xl font-bold">Session Ended</h3><p>Upload {sampleCount} samples?</p><div className="flex gap-3"><button onClick={() => setShowSavePrompt(false)} className="flex-1 py-3 bg-gray-100 rounded-xl">Discard</button><button onClick={saveSession} className="flex-1 py-3 bg-blue-600 text-white rounded-xl">Save</button></div></div></div>
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"><div className="bg-white dark:bg-zinc-800 p-6 rounded-3xl w-full max-w-sm space-y-4 shadow-xl text-center"><h3 className="text-xl font-bold text-gray-900 dark:text-white">Session Ended</h3><p className="text-gray-600 dark:text-gray-300">Upload {sampleCount} samples?</p><div className="flex gap-3"><button onClick={() => setShowSavePrompt(false)} className="flex-1 py-3 bg-gray-100 text-gray-800 dark:bg-zinc-700 dark:text-gray-200 font-semibold rounded-xl hover:bg-gray-200 dark:hover:bg-zinc-600 transition-colors">Discard</button><button onClick={saveSession} className="flex-1 py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-500/30">Save</button></div></div></div>
                 )}
             </div>
         </div>
@@ -1501,7 +1562,7 @@ function MapViewer() {
             </div>
             {loading ? (<div className="flex-1 flex items-center justify-center bg-zinc-900"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div></div>) : (
                 <div className="flex-1 z-0 relative">
-                    <MapContainer center={[15.4909, 73.8278]} zoom={11} className="w-full h-full" zoomControl={false}>
+                    <MapContainer preferCanvas={true} center={[15.4909, 73.8278]} zoom={11} className="w-full h-full" zoomControl={false}>
                         <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
                         <DynamicMapLayers
                             conditions={conditions}
@@ -1558,7 +1619,7 @@ function HistoryFeed() {
             const timeline = [
                 ...localIssues.map(i => ({ id: i.id, type: i.type === 'Garbage' ? 'Garbage Report' : 'Pothole Report', date: new Date(i.timestamp), status: 'Queued', isLocal: true, icon: '🗑️' })),
                 ...localSensors.map(s => ({ id: s.id, type: 'Sensor Session', date: new Date(s.readings[0]?.timestamp || Date.now()), status: 'Queued', isLocal: true, icon: 'Activity' })),
-                ...cloudReports.map(r => ({ id: r.id, type: r.issue_type === 'Garbage' ? 'Garbage Report' : 'Pothole Report', date: new Date(r.timestamp || r.created_at), status: r.status === 'pending' ? 'Processing' : 'Success', isLocal: false, icon: '🗑️' })),
+                ...cloudReports.map(r => ({ id: r.id, type: r.issue_type === 'Garbage' ? 'Garbage Report' : 'Pothole Report', date: new Date(r.timestamp || r.created_at), status: r.status === 'pending' ? 'Processing' : 'Resolved', isLocal: false, icon: '🗑️', resolutionPhoto: r.resolution_photo_url })),
                 ...cloudSensors.map(s => ({ id: s.id, type: 'Sensor Session', date: new Date(s.created_at), status: s.status === 'pending' ? 'Processing' : 'Success', isLocal: false, icon: 'Activity' }))
             ].sort((a, b) => b.date.getTime() - a.date.getTime());
             setHistoryItems(timeline);
@@ -1569,9 +1630,17 @@ function HistoryFeed() {
             <div className="bg-gradient-to-r from-green-500 to-blue-600 p-4 pt-12 pb-4 text-white flex items-center gap-4"><button onClick={() => navigate('/dashboard')} className="p-2"><ArrowLeft className="w-6 h-6" /></button><h1 className="text-xl font-bold">History</h1></div>
             <div className="p-4 space-y-4">
                 {loading ? (<div className="flex justify-center p-8"><Activity className="animate-spin" /></div>) : historyItems.map((item, idx) => (
-                    <div key={`${item.id}-${idx}`} className="bg-white dark:bg-zinc-800 p-4 rounded-2xl flex items-center gap-4 border border-gray-100 dark:border-zinc-700">
-                        <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">{item.icon === 'Activity' ? <Activity className="w-6 h-6" /> : <span className="text-xl">{item.icon}</span>}</div>
-                        <div className="flex-1"><h3 className="font-bold text-gray-900 dark:text-white truncate">{item.type}</h3><p className="text-xs text-gray-500">{item.date.toLocaleString()}</p><div className="flex items-center gap-1.5 mt-2"><div className={`w-2 h-2 rounded-full ${item.status === 'Success' ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}></div><span className="text-xs font-semibold">{item.status}</span></div></div>
+                    <div key={`${item.id}-${idx}`} className="bg-white dark:bg-zinc-800 p-4 rounded-2xl flex flex-col gap-2 border border-gray-100 dark:border-zinc-700">
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center">{item.icon === 'Activity' ? <Activity className="w-6 h-6" /> : <span className="text-xl">{item.icon}</span>}</div>
+                            <div className="flex-1"><h3 className="font-bold text-gray-900 dark:text-white truncate">{item.type}</h3><p className="text-xs text-gray-500">{item.date.toLocaleString()}</p><div className="flex items-center gap-1.5 mt-2"><div className={`w-2 h-2 rounded-full ${item.status === 'Processing' || item.status === 'Queued' ? 'bg-yellow-500 animate-pulse' : 'bg-green-500'}`}></div><span className="text-xs font-semibold text-gray-700 dark:text-gray-300">{item.status}</span></div></div>
+                        </div>
+                        {item.resolutionPhoto && (
+                            <div className="mt-3 border-t border-gray-100 dark:border-zinc-700 pt-3 animate-fadeIn">
+                                <p className="text-[10px] font-bold text-gray-500 uppercase mb-2 tracking-widest">Department Resolution Evidence</p>
+                                <img src={item.resolutionPhoto} alt="Resolution Evidence" className="w-full h-48 object-cover rounded-xl shadow-sm border border-gray-100 dark:border-zinc-700" />
+                            </div>
+                        )}
                     </div>
                 ))}
             </div>
@@ -1605,6 +1674,7 @@ function ForcedUpdateModal({ updateUrl }: { updateUrl: string }) {
         </div>
     );
 }
+
 function GovDashboardRedirect() {
     const [redirectPath, setRedirectPath] = useState<string | null>(null);
 
@@ -1613,13 +1683,35 @@ function GovDashboardRedirect() {
             const email = session?.user?.email || localStorage.getItem('gov_email');
             if (email) {
                 try {
-                    const { data } = await supabase.from('departments').select('department_type').eq('contact_email', email.toLowerCase()).limit(1);
-                    if (data && data.length > 0 && data[0].department_type) {
-                        const type = data[0].department_type.toUpperCase();
+                    const { data: deptData } = await supabase.from('departments').select('department_type').eq('contact_email', email.toLowerCase()).limit(1);
+                    
+                    let type = null;
+                    if (deptData && deptData.length > 0 && deptData[0].department_type) {
+                        type = deptData[0].department_type.toUpperCase();
+                    } else {
+                        // Check if they are a field worker
+                        const { data: workerData } = await supabase.from('field_workers').select('specialty').ilike('email', email.toLowerCase()).limit(1);
+                        if (workerData && workerData.length > 0) {
+                            const specialty = workerData[0].specialty?.toUpperCase() || '';
+                            if (specialty.includes('SANITATION') || specialty.includes('WASTE')) {
+                                type = 'PANCHAYAT';
+                            } else {
+                                type = 'PWD';
+                            }
+                        }
+                    }
+
+                    if (type) {
                         if (type.includes('PWD')) {
                             setRedirectPath('/gov/pwd');
                         } else if (type.includes('PANCHAYAT') || type.includes('MUNICIPAL')) {
                             setRedirectPath('/gov/panchayat');
+                        } else if (type.includes('BDO')) {
+                            setRedirectPath('/gov/bdo');
+                        } else if (type.includes('HEALTH')) {
+                            setRedirectPath('/gov/health');
+                        } else if (type.includes('GWMC') || type.includes('SWMF')) {
+                            setRedirectPath('/gov/gwmc');
                         } else {
                             setRedirectPath('/gov/pwd');
                         }
@@ -1627,6 +1719,7 @@ function GovDashboardRedirect() {
                         setRedirectPath('/gov/pwd');
                     }
                 } catch (e) {
+                    console.error('Redirect check failed', e);
                     setRedirectPath('/gov/pwd');
                 }
             } else {
@@ -1635,15 +1728,13 @@ function GovDashboardRedirect() {
         });
     }, []);
 
-    if (!redirectPath) {
-        return (
-            <div className="min-h-screen flex items-center justify-center bg-slate-900">
-                <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-            </div>
-        );
-    }
-
-    return <Navigate to={redirectPath} replace />;
+    if (redirectPath) return <Navigate to={redirectPath} />;
+    
+    return (
+        <div className="min-h-screen flex items-center justify-center bg-slate-50">
+            <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+    );
 }
 
 function App() {
@@ -1681,6 +1772,24 @@ function App() {
             }
         });
 
+        // Request all critical native permissions upfront for Android
+        const requestNativePermissions = async () => {
+            if (Capacitor.isNativePlatform()) {
+                try {
+                    await Geolocation.requestPermissions();
+                    await CapCamera.requestPermissions();
+                    
+                    const fsPerms = await ForegroundService.checkPermissions();
+                    if (fsPerms.display !== 'granted') await ForegroundService.requestPermissions();
+                    
+                    await GripSensor.requestPermissions();
+                } catch (e) {
+                    console.error("Permission request failed", e);
+                }
+            }
+        };
+        requestNativePermissions();
+
         // Listen for custom "auth-change" event for bypass login
         const handleBypassAuth = () => {
             setUserMode(localStorage.getItem('user_mode'));
@@ -1700,14 +1809,17 @@ function App() {
         <Router>
             <div className="min-h-screen bg-gray-50 dark:bg-zinc-900 font-sans antialiased text-gray-900 dark:text-gray-100">
                 <Routes>
-                    <Route path="/" element={(!session && userMode !== 'government') ? <Home /> : (userMode === 'government' ? <Navigate to="/gov-dashboard" /> : <Navigate to="/dashboard" />)} />
+                    <Route path="/" element={!session ? <Navigate to="/login" /> : (userMode === 'government' ? <Navigate to="/gov-dashboard" /> : <Navigate to="/dashboard" />)} />
                     <Route path="/login" element={!session ? <Login /> : <Navigate to="/dashboard" />} />
                     <Route path="/gov-login" element={<GovLogin />} />
                     
                     <Route path="/dashboard" element={session ? <Dashboard /> : <Navigate to="/login" />} />
                     <Route path="/gov-dashboard" element={<GovDashboardRedirect />} />
-                    <Route path="/gov/pwd" element={session || userMode === 'government' ? <GovernmentDashboard /> : <Navigate to="/gov-login" />} />
-                    <Route path="/gov/panchayat" element={session || userMode === 'government' ? <GovernmentDashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov/pwd/*" element={session || userMode === 'government' ? <PWDDashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov/panchayat/*" element={session || userMode === 'government' ? <PanchayatDashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov/bdo" element={session || userMode === 'government' ? <BDODashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov/health" element={session || userMode === 'government' ? <HealthDashboard /> : <Navigate to="/gov-login" />} />
+                    <Route path="/gov/gwmc" element={session || userMode === 'government' ? <GWMCDashboard /> : <Navigate to="/gov-login" />} />
                     
                     <Route path="/report/garbage" element={session ? <ReportGarbage /> : <Navigate to="/login" />} />
                     <Route path="/report/pothole" element={session ? <PotholeDetection /> : <Navigate to="/login" />} />

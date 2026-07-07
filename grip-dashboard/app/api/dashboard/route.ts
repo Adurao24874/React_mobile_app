@@ -20,10 +20,10 @@ export async function GET() {
     }
 
     // 2. Calculate KPIs mathematically (Replacing the SQL FILTER WHERE clauses)
-    const totalPending = reports.filter(r => ['pending', 'new'].includes(r.status?.toLowerCase())).length;
-    const totalDispatched = reports.filter(r => ['dispatched', 'in_progress', 'escalated'].includes(r.status?.toLowerCase())).length;
+    const totalPending = reports.filter(r => r.status?.toLowerCase() === 'pending').length;
+    const totalDispatched = reports.filter(r => r.status?.toLowerCase() === 'dispatched').length;
     const totalResolved = reports.filter(
-      r => ['completed', 'resolved'].includes(r.status?.toLowerCase())
+      r => r.status?.toLowerCase() === 'completed' || r.status?.toLowerCase() === 'resolved'
     ).length;
 
     const kpis = {
@@ -71,9 +71,9 @@ export async function GET() {
         ai_predictions: null, 
         latitude: r.latitude,
         longitude: r.longitude,
-        image_path: r.image_path, // Maps to your Supabase Storage column name
+        image_path: r.image_url, // Maps to your Supabase Storage column name
         resolution_photo_url: r.resolution_photo_url, 
-        user_email: r.user_email, // Maps to your user_email column name
+        user_email: r.citizen_email, 
         created_at: r.created_at,            
         escalation_deadline: r.escalation_deadline,   
         worker_name: r.assigned_department || 'Pending Assignment',

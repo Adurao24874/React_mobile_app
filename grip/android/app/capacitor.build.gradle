@@ -18,6 +18,7 @@ dependencies {
     implementation project(':capawesome-team-capacitor-android-foreground-service')
     implementation project(':capawesome-capacitor-background-task')
     implementation project(':capacitor-native-settings')
+    implementation project(':capacitor-secure-storage-plugin')
 
 }
 

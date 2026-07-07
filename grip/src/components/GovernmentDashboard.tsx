@@ -12,8 +12,7 @@ import {
   Activity,
   Menu,
   X,
-  Truck,
-  Factory
+  Truck
 } from 'lucide-react';
 import { MapContainer, TileLayer } from 'react-leaflet';
 import { supabase } from '../lib/supabase';
@@ -303,8 +302,11 @@ export default function GovernmentDashboard() {
 
     const handleSignOut = async () => {
         await supabase.auth.signOut();
-        localStorage.removeItem('user_mode');
-        localStorage.removeItem('gov_email');
+        const savedUserEmail = localStorage.getItem('saved_user_email');
+        const savedGovEmail = localStorage.getItem('saved_gov_email');
+        localStorage.clear();
+        if (savedUserEmail) localStorage.setItem('saved_user_email', savedUserEmail);
+        if (savedGovEmail) localStorage.setItem('saved_gov_email', savedGovEmail);
         window.dispatchEvent(new Event('auth-change'));
         navigate('/');
     };
@@ -1116,8 +1118,8 @@ export default function GovernmentDashboard() {
                     ))}
                 </nav>
                 <div className="p-6 mt-auto">
-                    <button onClick={handleSignOut} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
-                        <LogOut className="w-5 h-5 text-slate-400" />
+                    <button onClick={handleSignOut} className="p-3 bg-blue-600 border border-blue-700 rounded-full shadow-lg hover:bg-blue-700 transition-colors text-white">
+                        <LogOut className="w-5 h-5 text-white" />
                     </button>
                 </div>
             </aside>
@@ -1223,8 +1225,8 @@ export default function GovernmentDashboard() {
                             ))}
                         </div>
                         <div className="p-6 mt-auto">
-                            <button onClick={handleSignOut} className="w-full py-3 rounded-xl bg-white/5 font-bold flex items-center justify-center gap-2 hover:bg-white/10 transition-colors">
-                                <LogOut className="w-5 h-5 text-slate-400" /> Sign Out
+                            <button onClick={handleSignOut} className="p-3 bg-blue-600 border border-blue-700 rounded-full shadow-lg hover:bg-blue-700 transition-colors text-white flex justify-center items-center gap-2">
+                                <LogOut className="w-5 h-5 text-white" /> Sign Out
                             </button>
                         </div>
                     </aside>
@@ -1256,3 +1258,4 @@ export default function GovernmentDashboard() {
         </div>
     );
 }
+

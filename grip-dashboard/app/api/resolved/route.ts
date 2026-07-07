@@ -1,57 +1,133 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase'; // Make sure this path is correct!
+import { createServerClient } from '@supabase/ssr';
+import { cookies } from 'next/headers';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    // 1. Fetch from your central table with Supabase filters
-    const { data: reports, error } = await supabase
-      .from('reports') // Your main table
-      .select('*')
-      .in('status', ['resolved', 'completed', 'Resolved', 'Completed']) // Must be resolved
-      .ilike('issue_type', '%pothole%') // Must be a pothole
-     
-      .order('created_at', { ascending: false });
+    const cookieStore = await cookies();
+    const supabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { cookies: { getAll() { return cookieStore.getAll(); } } }
+    );
 
-    if (error) {
-      throw error;
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const safeUserEmail = user.email.trim().toLowerCase();
+    const { data: allDepts } = await supabase.from("departments").select("*");
+
+    const aeDept = allDepts?.find(d => d.contact_email && d.contact_email.trim().toLowerCase() === safeUserEmail);
+
+    let workerProfile = null;
+    let myDept = aeDept;
+    let role = 'JE';
+    let eeDistrict = null;
+    
+    if (aeDept) {
+      role = 'AE';
+    } else {
+      const { data: worker } = await supabase.from("field_workers").select("*").ilike("email", safeUserEmail).single();
+      workerProfile = worker;
+      if (workerProfile) {
+        if (workerProfile.hierarchy_level === 5) {
+          role = 'CE';
+        } else if (workerProfile.hierarchy_level === 4) {
+          role = 'EE';
+          eeDistrict = workerProfile.specialty.includes("North") ? "North Goa" : "South Goa";
+        } else {
+          role = 'JE';
+          myDept = allDepts?.find(d => String(d.id) === String(workerProfile.department_id));
+        }
+      }
     }
 
-    // 2. Map the Supabase data to the format your React frontend expects
-    const formattedTasks = (reports || []).map((r) => {
-      // Calculate SLA breach dynamically 
-      let isBreached = false;
+    if (!aeDept && !workerProfile) return NextResponse.json({ success: false, error: "Profile not found." }, { status: 403 });
+
+    let relevantWorkOrders: any[] = [];
+    let departmentWorkers: any[] = [];
+
+    if (role === 'CE') {
+      const { data: workers } = await supabase.from("field_workers").select("id, worker_name, department_id");
+      departmentWorkers = workers || [];
+      const workerIds = departmentWorkers.map(w => w.id);
+      if (workerIds.length > 0) {
+        const { data: wo } = await supabase.from("work_orders").select("*").in("worker_id", workerIds).in("status", ["Resolved", "resolved", "Completed", "completed"]);
+        relevantWorkOrders = wo || [];
+      }
+    } else if (role === 'EE') {
+      const districtDepts = allDepts?.filter(d => d.district === eeDistrict) || [];
+      const deptIds = districtDepts.map(d => d.id);
+      const { data: workers } = await supabase.from("field_workers").select("id, worker_name, department_id").in("department_id", deptIds);
+      departmentWorkers = workers || [];
+      const workerIds = departmentWorkers.map(w => w.id);
+      if (workerIds.length > 0) {
+        const { data: wo } = await supabase.from("work_orders").select("*").in("worker_id", workerIds).in("status", ["Resolved", "resolved", "Completed", "completed"]);
+        relevantWorkOrders = wo || [];
+      }
+    } else if (role === 'AE') {
+      const { data: workers } = await supabase.from("field_workers").select("id, worker_name, department_id").eq("department_id", myDept?.id);
+      departmentWorkers = workers || [];
+      const workerIds = departmentWorkers.map(w => w.id);
+      if (workerIds.length > 0) {
+        const { data: wo } = await supabase.from("work_orders").select("*").in("worker_id", workerIds).in("status", ["Resolved", "resolved", "Completed", "completed"]);
+        relevantWorkOrders = wo || [];
+      }
+    } else {
+      const { data: wo } = await supabase.from("work_orders").select("*").eq("worker_id", workerProfile.id).in("status", ["Resolved", "resolved", "Completed", "completed"]);
+      relevantWorkOrders = wo || [];
+    }
+
+    const myResolvedReportIds = relevantWorkOrders.map(wo => String(wo.report_id));
+    if (myResolvedReportIds.length === 0) return NextResponse.json({ success: true, role, resolvedTasks: [] });
+
+    const { data: allReports } = await supabase.from('dashboard_reports').select('*').in('id', myResolvedReportIds);
+
+    const formattedTasks = relevantWorkOrders.map((wo) => {
+      const report = allReports?.find(r => String(r.id) === String(wo.report_id));
       
-      // Use 'updated_at' as the resolution time, fallback to 'created_at' if missing
-      const resolutionTimestamp = r.updated_at || r.created_at || new Date().toISOString();
+      let assignedWorkerName = "Unknown JE";
+      if (role === 'AE' || role === 'EE' || role === 'CE') {
+          const worker = departmentWorkers.find(w => String(w.id) === String(wo.worker_id));
+          if (worker) {
+              assignedWorkerName = worker.worker_name;
+              if (role === 'EE' || role === 'CE') {
+                  const wDept = allDepts?.find(d => d.id === worker.department_id);
+                  if (wDept) assignedWorkerName += ` (${wDept.taluka_name})`;
+              }
+          }
+      } else {
+          assignedWorkerName = workerProfile.worker_name;
+      }
+
+      let isBreached = false;
+      const resolutionTimestamp = wo.resolved_at || new Date().toISOString();
       const resolvedTime = new Date(resolutionTimestamp).getTime();
 
-      if (r.escalation_deadline) {
-         const deadline = new Date(r.escalation_deadline).getTime();
-         isBreached = resolvedTime > deadline; // It's breached if resolved AFTER deadline
+      if (wo.due_date) {
+         const deadline = new Date(wo.due_date).getTime();
+         isBreached = resolvedTime > deadline; 
       }
 
       return {
-        // We use split('-')[0] to shorten long UUIDs into a readable Work Order number
-        work_order_id: String(r.id).split('-')[0], 
-        category_name: (r.issue_type || 'Pothole').replace(/_/g, ' ').toUpperCase(),
-        department_name: r.assigned_department || 'PWD Office',
-        village_name: r.village_name || r.assigned_department?.replace('PWD Division ', '') || 'Unknown Location',
-        worker_name: r.worker_name || 'Field Team',
+        work_order_id: String(wo.id), 
+        category_name: (report?.issue_type || 'Pothole').replace(/_/g, ' ').toUpperCase(),
+        department_name: report?.assigned_department || 'PWD Office',
+        village_name: report?.village_name || 'Location Logged',
+        worker_name: assignedWorkerName, 
         resolved_at: resolutionTimestamp,
-        due_date: r.escalation_deadline || new Date().toISOString(),
+        due_date: wo.due_date || new Date().toISOString(),
         is_sla_breached: isBreached
       };
     });
 
-    return NextResponse.json({ success: true, resolvedTasks: formattedTasks });
+    formattedTasks.sort((a, b) => new Date(b.resolved_at).getTime() - new Date(a.resolved_at).getTime());
+
+    return NextResponse.json({ success: true, role, resolvedTasks: formattedTasks });
 
   } catch (error: any) {
-    console.error("Resolved API Error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Database fetch failed" }, 
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: error.message || "Database fetch failed" }, { status: 500 });
   }
 }

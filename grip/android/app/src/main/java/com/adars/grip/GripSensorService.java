@@ -1,5 +1,8 @@
 package com.adars.grip;
 
+import android.media.ToneGenerator;
+import android.media.AudioManager;
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -116,10 +119,26 @@ public class GripSensorService extends Service implements SensorEventListener, L
 
     private void startHeartbeat() {
         heartbeatHandler.postDelayed(new Runnable() {
+            private int tickCount = 0;
             @Override
             public void run() {
                 if (sensorManager != null) {
                     Log.d(TAG, "Heartbeat: Service active, collected " + readings.size() + " samples");
+                    
+                    tickCount++;
+                    if (tickCount % 3 == 0) {
+                        try {
+                            ToneGenerator toneGen = new ToneGenerator(AudioManager.STREAM_NOTIFICATION, 50);
+                            toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 150);
+                            new Handler().postDelayed(new Runnable() {
+                                public void run() {
+                                    toneGen.release();
+                                }
+                            }, 200);
+                        } catch (Exception e) {
+                            Log.e(TAG, "Failed to play heartbeat beep", e);
+                        }
+                    }
                 }
                 heartbeatHandler.postDelayed(this, 10000);
             }
@@ -173,6 +192,11 @@ public class GripSensorService extends Service implements SensorEventListener, L
             reading.put("timestamp", currentTime);
 
             readings.add(reading);
+
+            // Prevent OOM crashes if JS is paused in background and can't pull data fast enough
+            if (readings.size() > 12000) { // ~3 minutes of buffered data at 70Hz max
+                readings.remove(0);
+            }
 
             // Update notification every ~5 seconds with sample count to help user verify
             // screen-off activity
@@ -254,9 +278,9 @@ public class GripSensorService extends Service implements SensorEventListener, L
         float accelVariance = getAccelVariance(ax, ay, az);
         long now = System.currentTimeMillis();
 
-        if (speed < 2.0f) {
+        if (speed < 1.0f) {
             if (lowSpeedStart == null) lowSpeedStart = now;
-            if (now - lowSpeedStart > 3000) {
+            if (now - lowSpeedStart > 5000) {
                 isMoving = false;
             }
         } else {

@@ -21,6 +21,7 @@ export const activeStore = localforage.createInstance({
 export interface IssuePayload {
     id: string;
     user_id?: string;
+    user_email?: string;
     imageUri: string;
     lat: number;
     lng: number;
@@ -41,6 +42,7 @@ export interface SensorBatch {
         lng?: number;
         timestamp: number;
     }>;
+    vehicle_type?: string;
     status: 'pending' | 'syncing' | 'synced';
 }
 
@@ -57,6 +59,7 @@ export const StorageService = {
             ...payload,
             id,
             user_id: session?.user.id,
+            user_email: session?.user.email,
             status: 'pending'
         };
         await issueStore.setItem(id, issue);

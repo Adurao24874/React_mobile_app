@@ -7,35 +7,12 @@ interface ResolvedReport {
   issue_type: string;
   village_name: string | null;
   worker_name: string | null;
-  resolved_at: string; // Timestamp when it was closed
+  resolved_at: string; 
   is_sla_breached: boolean;
   resolution_photo_url: string | null;
   proof_type: 'MRF_Bale' | 'GWMC_Receipt' | 'Geo_Photo';
+  is_my_territory?: boolean;
 }
-
-// MOCK DATA: Fallback if API fails or is empty during MVP testing
-const MOCK_RESOLVED: ResolvedReport[] = [
-  {
-    id: "REP-9921-A8B2",
-    issue_type: "Massive Construction Debris",
-    village_name: "Torxem Highway",
-    worker_name: "Naik Earthmovers",
-    resolved_at: new Date(Date.now() - 3600000).toISOString(), // 1 hour ago
-    is_sla_breached: false,
-    resolution_photo_url: "GWMC-99281A", // Simulating a receipt ID
-    proof_type: "GWMC_Receipt"
-  },
-  {
-    id: "REP-4432-X7Y9",
-    issue_type: "Garbage Overflow",
-    village_name: "Market Road",
-    worker_name: "MTS Field Worker (Ramesh)",
-    resolved_at: new Date(Date.now() - 172800000).toISOString(), // 2 days ago
-    is_sla_breached: true, // Took too long!
-    resolution_photo_url: "https://images.unsplash.com/photo-1515162816999-a0c47dc192f7?auto=format&fit=crop&w=800&q=80",
-    proof_type: "Geo_Photo"
-  }
-];
 
 export default function ResolvedPage() {
   const [reports, setReports] = useState<ResolvedReport[]>([]);
@@ -43,16 +20,19 @@ export default function ResolvedPage() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/dashboard')
+    // 1. Point to the smart API that knows the logged-in Secretary
+    fetch('/api/panchayat/dashboard')
       .then(res => res.json())
       .then(json => {
-        if (json.success && json.reports) {
+        if (json.success && json.tickets) {
           
-          // 1. The Domain Filter: Only keep rows that are Resolved AND are related to Waste
-          const completedTickets = json.reports.filter((r: any) => {
+          // 2. Filter: Must be Mine, Must be Resolved, Must be Waste
+          const completedTickets = json.tickets.filter((r: any) => {
+            // IF IT DOESN'T BELONG TO MY VILLAGE, THROW IT OUT
+            if (!r.is_my_territory) return false;
+
             const isResolved = r.status?.toLowerCase() === "resolved" || r.status?.toLowerCase() === "completed";
             
-            // Check if the issue type contains waste-related keywords
             const issue = (r.issue_type || "").toLowerCase();
             const isWasteRelated = 
               issue.includes("garb") || 
@@ -65,30 +45,27 @@ export default function ResolvedPage() {
             return isResolved && isWasteRelated;
           });
           
-          if (completedTickets.length > 0) {
-            // 2. Map your DB fields to our UI interface
-            const formatted = completedTickets.map((t: any) => ({
-              id: t.id,
-              issue_type: t.issue_type,
-              village_name: t.village_name || 'Location Mapped',
-              worker_name: t.user_email || 'Verified Contractor',
-              resolved_at: t.created_at || new Date().toISOString(), // Using created_at since updated_at is missing
-              is_sla_breached: new Date() > new Date(t.escalation_deadline),
-              resolution_photo_url: t.resolution_photo_url,
-              proof_type: t.issue_type.toLowerCase().includes('debris') ? 'GWMC_Receipt' : 'Geo_Photo'
-            }));
-            setReports(formatted);
-          } else {
-            setReports(MOCK_RESOLVED); // Use mock data if no resolved waste tickets exist yet
-          }
+          // 3. Map to UI format
+          const formatted = completedTickets.map((t: any) => ({
+            id: t.id,
+            issue_type: t.issue_type,
+            village_name: t.village_name || 'Location Mapped',
+            worker_name: t.user_email || 'Verified Contractor',
+            resolved_at: t.created_at || new Date().toISOString(), 
+            is_sla_breached: new Date() > new Date(t.escalation_deadline),
+            resolution_photo_url: t.resolution_photo_url,
+            proof_type: (t.issue_type || '').toLowerCase().includes('debris') ? 'GWMC_Receipt' : 'Geo_Photo'
+          }));
+          
+          setReports(formatted);
         } else {
-          setReports(MOCK_RESOLVED);
+          setReports([]);
         }
         setLoading(false);
       })
       .catch(err => {
         console.error("Failed to fetch:", err);
-        setReports(MOCK_RESOLVED);
+        setReports([]);
         setLoading(false);
       });
   }, []);
@@ -138,11 +115,13 @@ export default function ResolvedPage() {
             <tbody className="divide-y divide-slate-100">
               {reports.map((report) => {
                 const resolvedDate = new Date(report.resolved_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+                // SAFETY: Fallback for issue type
+                const safeIssueType = report.issue_type || 'Unclassified Hazard';
                 
                 return (
                   <tr key={report.id} className="hover:bg-slate-50/80 transition-colors group">
                     <td className="p-5">
-                      <span className="block font-bold text-slate-800 capitalize">{report.issue_type.replace(/_/g, ' ')}</span>
+                      <span className="block font-bold text-slate-800 capitalize">{safeIssueType.replace(/_/g, ' ')}</span>
                       <span className="text-[10px] font-bold text-slate-400 font-mono tracking-wider bg-slate-100 px-2 py-0.5 rounded mt-1 inline-block">
                         {report.id.split('-')[0]}
                       </span>

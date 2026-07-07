@@ -94,6 +94,7 @@ export const SyncEngine = {
                     .insert({
                         id: issue.id,
                         user_id: issue.user_id,
+                        user_email: issue.user_email,
                         issue_type: issue.type || 'auto',
                         latitude: issue.lat,
                         longitude: issue.lng,
@@ -124,7 +125,7 @@ export const SyncEngine = {
 
                 const fileName = `sensors/batch_${batch.id}.json`;
                 // Create a JSON Blob of the passive telemetry
-                const jsonBlob = new Blob([JSON.stringify({ id: batch.id, readings: batch.readings })], { type: 'application/json' });
+                const jsonBlob = new Blob([JSON.stringify({ id: batch.id, vehicle_type: batch.vehicle_type || '2_wheeler', readings: batch.readings })], { type: 'application/json' });
 
                 // 1. Upload massive telemetry file to Storage to save Postgres limits
                 const { error: uploadError } = await supabase.storage

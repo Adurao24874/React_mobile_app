@@ -13,7 +13,7 @@ interface PendingReport {
   status: string;
   latitude: number; 
   longitude: number; 
-  image_path: string; 
+  image_path: string | null; 
   worker_name?: string;
   hours_remaining?: number;
   risk_status?: string; 
@@ -26,16 +26,12 @@ export default function PendingPage() {
 
   const fetchReports = () => {
     setLoading(true);
-    fetch("/api/dashboard") 
+    // THE FIX: Fetch from our new secure, worker-specific API
+    fetch("/api/pending") 
       .then((res) => res.json())
       .then((json) => {
         if (json.success) {
-          const fetchedData = json.reports || json.tasks || [];
-          const activeTickets = fetchedData.filter(
-            (r: PendingReport) =>
-              r.status?.toLowerCase() !== "resolved" &&
-              r.status?.toLowerCase() !== "completed",
-          );
+          const activeTickets = json.reports || [];
           
           activeTickets.sort((a: PendingReport, b: PendingReport) => {
              const getScore = (status?: string) => {
@@ -53,7 +49,7 @@ export default function PendingPage() {
         setLoading(false);
       })
       .catch((err) => {
-        console.error("Failed to fetch dashboard data:", err);
+        console.error("Failed to fetch pending data:", err);
         setReports([]);
         setLoading(false);
       });
@@ -123,11 +119,11 @@ export default function PendingPage() {
           <div>
             <div className="flex items-center gap-3 mb-2">
               <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">
-                Active Work Orders
+                My Active Tasks
               </h1>
             </div>
             <p className="text-slate-500 font-medium">
-              Monitor field resolution SLAs and potential deadline breaches.
+              Monitor your personal field resolution SLAs and potential deadline breaches.
             </p>
           </div>
         </div>
@@ -161,12 +157,13 @@ export default function PendingPage() {
                       </td>
                       <td className="p-5">
                         <span className="font-medium text-slate-700 block">
-                          {report.village_name || "Goa, India"}
+                          {report.village_name || "Coordinates Logged"}
                         </span>
                       </td>
                       <td className="p-5">
-                        <div className="text-sm font-medium text-slate-900">
-                          {report.worker_name || "Pending Assignment"}
+                        <div className="text-sm font-medium text-slate-900 flex items-center">
+                          {report.worker_name || "Assigned"}
+                          <span className="text-[10px] bg-blue-600 text-white px-1.5 py-0.5 rounded ml-2 uppercase">You</span>
                         </div>
                       </td>
                       <td className="p-5">
@@ -190,10 +187,7 @@ export default function PendingPage() {
                     {/* Expandable Details Drawer */}
                     {expandedRow === report.id && (
                       <tr>
-                        <td
-                          colSpan={5}
-                          className="bg-slate-50 p-0 border-b-2 border-indigo-100"
-                        >
+                        <td colSpan={5} className="bg-slate-50 p-0 border-b-2 border-indigo-100">
                           <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-8 animate-fadeIn">
                             {/* Left Column: Evidence */}
                             <div>
@@ -201,15 +195,21 @@ export default function PendingPage() {
                                 Original Evidence
                               </h4>
                               <div className="aspect-video bg-slate-200 rounded-lg overflow-hidden border border-slate-300 relative shadow-inner">
-                                <img
-                                  src={`https://ytmuudbkuhkfqkzchtce.supabase.co/storage/v1/object/public/reports/${report.image_path}`}
-                                  alt="Infrastructure Issue"
-                                  className="w-full h-full object-cover"
-                                  onError={(e) => {
-                                    e.currentTarget.src =
-                                      "https://via.placeholder.com/400x200?text=No+Image+Available";
-                                  }}
-                                />
+                                {/* SAFE IMAGE LOADER */}
+                                {report.image_path ? (
+                                  <img
+                                    src={`https://ytmuudbkuhkfqkzchtce.supabase.co/storage/v1/object/public/reports/${report.image_path}`}
+                                    alt="Infrastructure Issue"
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      e.currentTarget.src = "https://via.placeholder.com/400x200?text=No+Image+Available";
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center bg-slate-100 text-slate-400 font-medium">
+                                    No Image Provided
+                                  </div>
+                                )}
                               </div>
                               <div className="mt-4 bg-white p-3 rounded border border-slate-200">
                                 <p className="text-xs text-slate-500 font-mono">
@@ -252,25 +252,15 @@ export default function PendingPage() {
                   <tr>
                     <td colSpan={5} className="p-12 text-center">
                       <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-50 text-green-500 mb-4">
-                        <svg
-                          className="w-8 h-8"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M5 13l4 4L19 7"
-                          />
+                        <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                         </svg>
                       </div>
                       <h3 className="text-lg font-bold text-slate-900 mb-1">
                         Queue Empty
                       </h3>
                       <p className="text-slate-500">
-                        All infrastructure issues have been resolved.
+                        You have no active infrastructure issues assigned to you.
                       </p>
                     </td>
                   </tr>

@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "keywords": [],
@@ -29,6 +29,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "axios": "^1.13.5",
     "capacitor-native-settings": "^8.0.0",
+    "capacitor-secure-storage-plugin": "^0.13.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "leaflet": "^1.9.4",

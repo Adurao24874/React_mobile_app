@@ -25,23 +25,24 @@ try:
         for feature in data.get('features', []):
             poly = shape(feature['geometry'])
             name = feature['properties'].get('NAME', 'Unknown Village')
-            GOA_VILLAGES.append((name, poly))
+            sub_dist = feature['properties'].get('SUB_DIST', 'Unknown')
+            GOA_VILLAGES.append((name, sub_dist, poly))
     print(f"🌍 Loaded {len(GOA_VILLAGES)} village boundaries for spatial routing.")
 except Exception as e:
     print(f"⚠️ Failed to load goa_villages.geojson: {e}")
 
-def get_village_name(lat, lon):
-    if not lat or not lon: return None
+def get_village_details(lat, lon):
+    if not lat or not lon: return None, None
     pt = Point(lon, lat) # GeoJSON expects (longitude, latitude)
-    for name, poly in GOA_VILLAGES:
+    for name, sub_dist, poly in GOA_VILLAGES:
         if poly.contains(pt):
-            return name
-    return None
+            return name, sub_dist
+    return None, None
 
 # Thresholds for Avoidance Detection
 LATERAL_THRESHOLD = 0.5   # Adjust based on real-world sensitivity
 COVERAGE_RATIO = 0.3      # Segment is considered 'avoided' if samples < 30% of neighbors
-MIN_SAMPLES = 50          # Minimum samples for label confidence
+MIN_SAMPLES = 10          # Minimum samples for label confidence
 
 # 1. Initialize Supabase with hardened connection settings
 URL = "https://ytmuudbkuhkfqkzchtce.supabase.co"
@@ -233,10 +234,11 @@ def process_report(report):
         "ai_predictions": json.dumps(predictions)
     }
 
+    sub_dist = None
     if not report.get('village_name') and report.get('latitude') and report.get('longitude'):
-        v_name = get_village_name(report['latitude'], report['longitude'])
+        v_name, sub_dist = get_village_details(report['latitude'], report['longitude'])
         if v_name:
-            print(f"    📍 Matched coordinates to village: {v_name}")
+            print(f"    📍 Matched coordinates to village: {v_name} in Taluka: {sub_dist}")
             update_payload['village_name'] = v_name
 
     try:
@@ -244,6 +246,32 @@ def process_report(report):
     except Exception as e:
         print(f"    ❌ Database update failed: {e}")
         return
+        
+    # ONLY insert into work_orders if it's an infrastructure issue (e.g. PWD handles potholes)
+    # n8n will take over the assignment from here!
+    is_pwd_issue = 'pothole' in detected_type.lower() or 'road' in detected_type.lower() or 'damage' in detected_type.lower()
+    
+    if is_pwd_issue and sub_dist:
+        print(f"    🏗️ Creating Unassigned Work Order for n8n to dispatch...")
+        try:
+            # 1. Find the department ID for this Taluka
+            dept_res = supabase.table('departments').select('id').eq('taluka_name', sub_dist).execute()
+            if dept_res.data and len(dept_res.data) > 0:
+                dept_id = dept_res.data[0]['id']
+                
+                # 2. Insert the Work Order. The GRIP Dispatch Trigger will fire and hand off to n8n!
+                wo_payload = {
+                    "report_uuid": report['id'],
+                    "department_id": dept_id,
+                    "status": "Pending",
+                    # due_date is set automatically by DB or we can leave it null for now
+                }
+                supabase.table('work_orders').insert(wo_payload).execute()
+                print(f"    ✅ Work Order Created for {sub_dist} (n8n Webhook Fired!)")
+            else:
+                print(f"    ⚠️ No PWD Department found for Taluka: {sub_dist}")
+        except Exception as e:
+            print(f"    ❌ Failed to create work_orders entry: {e}")
 
     # Results are updated in the DB, and the file is kept in Storage for 24h by the retention monitor
     print(f"--> 🏁 Finished Report [{report['id']}]\n")
@@ -255,7 +283,7 @@ def reliable_execute(query_builder, retries=5):
         except Exception as e:
             err_str = str(e).lower()
             # Retry on SSL/Transport errors
-            if i < retries - 1 and ("ssl" in err_str or "eof" in err_str or "connection" in err_str or "timeout" in err_str):
+            if i < retries - 1 and ("ssl" in err_str or "eof" in err_str or "connect" in err_str or "timeout" in err_str):
                 delay = 2 ** i
                 print(f"        Connection glitch, retrying in {delay}s... ({i+1}/{retries})")
                 time.sleep(delay)
@@ -344,17 +372,16 @@ def load_junction_cells():
     out geom;
     """
     try:
-        url = "https://overpass-api.de/api/interpreter"
-        req = urllib.request.Request(
-            url,
-            data=f"data={urllib.parse.quote(query)}".encode('utf-8'),
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
+        import requests
+        url = "https://lz4.overpass-api.de/api/interpreter"
+        resp = requests.post(
+            url, 
+            data={'data': query}, 
+            headers={'User-Agent': 'GripMobapp/1.0', 'Accept': 'application/json'},
+            timeout=60
         )
-        data = urllib.request.urlopen(req, timeout=60).read()
-        osm = json.loads(data)
+        resp.raise_for_status()
+        osm = resp.json()
 
         cells = set()
         for element in osm.get('elements', []):
@@ -419,14 +446,12 @@ def process_sensors(batch):
             payload = json.loads(res.decode('utf-8'))
             readings = payload.get('readings', [])
             
-            # Immediately delete from Supabase
+            # Do NOT immediately delete from Supabase - wait for success
             try:
-                supabase.storage.from_('reports').remove([file_path])
-                print(f"    🗑️ Deleted {file_path} from Supabase Storage")
                 # Update DB to point to local path
                 supabase.table('sensors').update({"local_file_path": f"uploads/sensors/{filename}"}).eq("id", batch['id']).execute()
             except Exception as e:
-                print(f"    ⚠️ Could not delete from Supabase: {e}")
+                print(f"    ⚠️ Could not update local_file_path in Supabase: {e}")
             
         print(f"    📊 Loaded {len(readings)} sensor samples into RAM")
     except Exception as e:
@@ -439,7 +464,7 @@ def process_sensors(batch):
     print("    🧠 Processing telemetry (High-Pass + Complementary Math)...")
     try:
         import pandas as pd
-        from telemetry import classify_dataframe
+        from ml_telemetry import classify_dataframe_ml
         
         df = pd.DataFrame(readings)
         
@@ -452,21 +477,26 @@ def process_sensors(batch):
                 'gyroX': 'gyro_x', 'gyroY': 'gyro_y', 'gyroZ': 'gyro_z',
                 'lat': 'latitude', 'lng': 'longitude'
             })
-            
             if 'latitude' in df.columns and 'longitude' in df.columns:
                 df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
                 df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+
+            vehicle_type = payload.get('vehicle_type', '2_wheeler')
+            if vehicle_type == "4_wheeler":
+                print("    🚙 Applying 4-Wheeler Scale Multipliers...")
+                factors = {
+                    "accel_x": 0.5, "accel_y": 0.5, "accel_z": 0.4,
+                    "gyro_x": 0.6, "gyro_y": 0.6, "gyro_z": 0.7
+                }
+                for col, k in factors.items():
+                    if col in df.columns and k != 1.0:
+                        df[col] = pd.to_numeric(df[col], errors='coerce') / k
 
             if 'speed' in df.columns:
                 df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
                 df = df[df['speed'] >= 2.0]
                 
-            events, _ = classify_dataframe(
-                df,
-                min_samples=50,
-                use_gyro=True,
-                axis_mode='gyro'
-            )
+            events, _ = classify_dataframe_ml(df)
         
         print(f"    🗺️ Extracted {len(events)} physical street map points.")
         
@@ -563,7 +593,7 @@ def process_sensors(batch):
                         continue # Don't write pure interpolation cells to the DB
 
                     batch_rms = float(np.mean([i['vibration_intensity'] for i in items]))
-                    batch_count = sum([i.get('samples', 50) for i in items])
+                    batch_count = len(items)
                     batch_lateral_var = float(np.mean([i.get('lateral_variance', 0.0) for i in items]))
                     
                     batch_label = 'GOOD'
@@ -685,7 +715,7 @@ def process_sensors(batch):
                             final_label = 'OBSTACLE'
 
                     existing = existing_map.get(seg_id)
-                    v_name = existing.get('village_name') if existing and existing.get('village_name') else get_village_name(snapped_lat, snapped_lng)
+                    v_name = existing.get('village_name') if existing and existing.get('village_name') else get_village_details(snapped_lat, snapped_lng)[0]
                     
                     segments_to_upsert.append({
                         "segment_id": seg_id,
@@ -728,14 +758,23 @@ def process_sensors(batch):
         print(f"    ❌ Critical Error: {e}")
         if not batch.get('id', '').startswith('local_import_'):
             supabase.table('sensors').update({"status": "failed"}).eq("id", batch['id']).execute()
-        return
+        return False
     
     # Complete Workflow
     if not batch.get('id', '').startswith('local_import_'):
         print("    Marking batch Completed...")
         supabase.table('sensors').update({"status": "completed"}).eq("id", batch['id']).execute()
+        
+        # Now it is safe to delete from cloud storage
+        if batch.get('local_file_path'):
+            try:
+                supabase.storage.from_('reports').remove([batch['local_file_path']])
+                print(f"    🗑️ Deleted {batch['local_file_path']} from Supabase Storage")
+            except Exception as e:
+                print(f"    ⚠️ Could not delete from Supabase: {e}")
 
     print(f"--> Finished Sensors [{batch.get('batch_id')}]\n")
+    return True
 
 if __name__ == "__main__":
     import sys

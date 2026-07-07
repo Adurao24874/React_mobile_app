@@ -1,11 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { supabase } from '../lib/supabase'; // Adjust this path if your supabase client is elsewhere
+import { supabase } from '../lib/supabase'; 
 
 interface ResolveButtonProps {
     reportId: string;
-    onSuccess?: () => void; // Optional callback to refresh the page/map after success
+    onSuccess?: () => void; 
 }
 
 export default function ResolveTicketButton({ reportId, onSuccess }: ResolveButtonProps) {
@@ -20,7 +20,6 @@ export default function ResolveTicketButton({ reportId, onSuccess }: ResolveButt
 
         setIsResolving(true);
 
-        // 1. Force a high-accuracy GPS lock from the worker's device
         if (!navigator.geolocation) {
             alert("❌ Geolocation is not supported by your browser.");
             setIsResolving(false);
@@ -33,38 +32,34 @@ export default function ResolveTicketButton({ reportId, onSuccess }: ResolveButt
                 const workerLng = position.coords.longitude;
 
                 try {
-                    // 2. Upload the Resolution Photo to Supabase Storage
                     const fileExt = photoFile.name.split('.').pop();
                     const fileName = `resolutions/resolved_${reportId}_${Date.now()}.${fileExt}`;
 
                     const { error: uploadError } = await supabase.storage
-                        .from('reports') // Assuming you are using the same bucket
+                        .from('reports') 
                         .upload(fileName, photoFile, { contentType: photoFile.type });
 
                     if (uploadError) throw new Error(`Photo upload failed: ${uploadError.message}`);
 
-                    // Get the public URL for the newly uploaded photo
                     const { data: { publicUrl } } = supabase.storage
                         .from('reports')
                         .getPublicUrl(fileName);
 
-                    // 3. Call our custom Haversine Geofence RPC in the Database
+                    // THE FIX: We use parseInt() to strip away the String and send a pure Integer to Postgres!
                     const { data, error: rpcError } = await supabase.rpc('resolve_report_with_geofence', {
-                        p_report_id: reportId,
+                        p_report_id: parseInt(reportId), 
                         p_worker_lat: workerLat,
                         p_worker_lng: workerLng,
                         p_photo_url: publicUrl,
-                        p_max_distance_meters: 30 // Strict 30-meter radius
+                        p_max_distance_meters: 30 
                     });
 
                     if (rpcError) throw new Error(`Database error: ${rpcError.message}`);
 
-                    // 4. Handle the Database's Verdict
                     if (data.success) {
                         alert(`✅ Ticket Resolved! Location verified (Distance: ${data.distance_meters} meters).`);
-                        if (onSuccess) onSuccess(); // Refresh the UI
+                        if (onSuccess) onSuccess(); 
                     } else {
-                        // The database rejected it (e.g., worker is 500 meters away)
                         alert(`🛑 ${data.error}`);
                     }
 
@@ -81,35 +76,35 @@ export default function ResolveTicketButton({ reportId, onSuccess }: ResolveButt
                 alert("❌ Failed to get your exact location. Please ensure location services are turned on and try again.");
                 setIsResolving(false);
             },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 } // Force fresh, precise GPS data
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 } 
         );
     };
 
     return (
-        <div className="p-4 border rounded-lg bg-gray-50 flex flex-col gap-4 mt-4">
-            <h3 className="font-semibold text-gray-800">Resolve this Ticket</h3>
+        <div className="p-4 border border-indigo-100 rounded-xl bg-indigo-50/30 flex flex-col gap-4 mt-4">
+            <h3 className="font-bold text-slate-800">Resolve this Ticket</h3>
             
             <input 
                 type="file" 
                 accept="image/*" 
-                capture="environment" // Suggests opening the mobile camera directly
+                capture="environment" 
                 onChange={(e) => setPhotoFile(e.target.files?.[0] || null)}
-                className="file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                className="file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-100 file:text-indigo-700 hover:file:bg-indigo-200 cursor-pointer"
             />
             
             <button 
                 onClick={handleResolve} 
                 disabled={isResolving || !photoFile}
-                className={`py-2 px-4 rounded-md text-white font-bold transition-all ${
+                className={`py-3 px-4 rounded-lg text-white font-bold transition-all shadow-sm ${
                     isResolving || !photoFile 
-                    ? 'bg-gray-400 cursor-not-allowed' 
-                    : 'bg-green-600 hover:bg-green-700 shadow-md'
+                    ? 'bg-slate-400 cursor-not-allowed' 
+                    : 'bg-emerald-600 hover:bg-emerald-700 shadow-md transform hover:-translate-y-0.5'
                 }`}
             >
                 {isResolving ? 'Verifying Location & Uploading...' : 'Mark as Resolved'}
             </button>
-            <p className="text-xs text-gray-500">
-                * Note: Your GPS location will be verified against the report location. You must be physically on-site.
+            <p className="text-xs text-slate-500 font-medium">
+                * Note: Your GPS location will be verified against the report location. You must be physically on-site within 30 meters.
             </p>
         </div>
     );

@@ -1,80 +1,171 @@
-import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { NextResponse } from "next/server";
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    // 1. Fetch only the PWD Departments from your database
-    const { data: departments, error: deptError } = await supabase
-      .from('departments')
-      .select('*')
-      .eq('department_type', 'PWD_DIVISION'); // This acts as your SQL WHERE clause
+    const cookieStore = await cookies();
+    const supabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { cookies: { getAll() { return cookieStore.getAll(); } } }
+    );
 
-    if (deptError) throw deptError;
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    // 2. Fetch the reports to calculate the dynamic numbers
-    // Note: We use 'citizen_reports' based on your previous terminal errors!
-    const { data: reports, error: reportError } = await supabase
-      .from('citizen_reports')
-      .select('*');
+    const safeUserEmail = user.email?.trim().toLowerCase() || "";
+    const { data: allDepts } = await supabase.from("departments").select("*");
 
-    if (reportError) throw reportError;
+    // 1. THE BULLETPROOF IDENTITY CHECK (AE, JE, EE, or CE?)
+    const aeDept = allDepts?.find(d => d.contact_email && d.contact_email.trim().toLowerCase() === safeUserEmail);
 
-    // 3. Compile the data mathematically (Replacing the complex SQL JOINs)
-    const enhancedDepartments = departments.map((dept) => {
-      // Find all reports assigned to this specific PWD division
-      const deptReports = reports.filter(
-        (r) => r.assigned_department === dept.department_name
-      );
-
-      // Calculate the stats
-      const total = deptReports.length;
+    let workerProfile: any = null;
+    let myDept = aeDept;
+    let role = 'JE';
+    let eeDistrict = null;
+    
+    if (aeDept) {
+      role = 'AE';
+    } else {
+      const { data: worker } = await supabase.from("field_workers").select("*").ilike("email", safeUserEmail).single();
+      workerProfile = worker;
       
-      const resolved = deptReports.filter(
-        (r) => r.status?.toLowerCase() === 'resolved' || r.status?.toLowerCase() === 'completed'
-      ).length;
-
-      // Calculate Active Breaches (Pending issues past their deadline)
-      const breaches = deptReports.filter((r) => {
-        if (r.status?.toLowerCase() === 'resolved' || r.status?.toLowerCase() === 'completed') {
-          return false;
+      if (workerProfile) {
+        if (workerProfile.hierarchy_level === 5) {
+          role = 'CE'; // Chief Engineer detected!
+        } else if (workerProfile.hierarchy_level === 4) {
+          role = 'EE'; // Executive Engineer detected!
+          eeDistrict = workerProfile.specialty.includes("North") ? "North Goa" : "South Goa";
+        } else {
+          role = 'JE';
+          myDept = allDepts?.find(d => String(d.id) === String(workerProfile.department_id));
         }
-        if (r.escalation_deadline) {
-          const deadline = new Date(r.escalation_deadline).getTime();
-          const now = new Date().getTime();
-          return now > deadline; // It's a breach if NOW is past the deadline
-        }
-        return false;
-      }).length;
+      }
+    }
 
-      // Return the perfectly formatted object
-      return {
-        department_id: dept.id,
-        department_name: dept.department_name,
-        taluka_name: dept.taluka_name,
-        department_type: dept.department_type,
-        officer_in_charge: dept.officer_in_charge || 'Executive Engineer',
-        contact_email: dept.contact_email,
-        
-        // Calculated Metrics
-        total_reports: total,
-        resolved_reports: resolved,
-        active_breaches: breaches,
-        
-        // Mocking field workers for now to prevent crashes. 
-        // If you have a 'field_workers' table, you can query it and measure the length here later!
-        total_workers: Math.floor(Math.random() * 8) + 4, 
-      };
+    if (!aeDept && !workerProfile) return NextResponse.json({ success: false, error: "ACCESS DENIED: Profile not found." }, { status: 403 });
+
+    const userName = role === 'AE' ? aeDept.officer_in_charge : workerProfile.worker_name;
+    const userLevel = role === 'AE' ? 1 : workerProfile.hierarchy_level;
+    const userTaluka = role === 'CE' ? "State of Goa" : role === 'EE' ? `${eeDistrict} District` : (myDept?.taluka_name || "Unknown");
+
+    // 2. FETCH WORK ORDERS BASED ON ROLE
+    let relevantWorkOrders: any[] = [];
+    let departmentWorkers: any[] = [];
+
+    if (role === 'CE') {
+      // CE View: Get EVERYTHING
+      const { data: workers } = await supabase.from("field_workers").select("id, worker_name, department_id");
+      departmentWorkers = workers || [];
+      const workerIds = departmentWorkers.map(w => w.id);
+
+      if (workerIds.length > 0) {
+        const { data: wo } = await supabase.from("work_orders").select("*").in("worker_id", workerIds);
+        relevantWorkOrders = wo || [];
+      }
+    } else if (role === 'EE') {
+      const districtDepts = allDepts?.filter(d => d.district === eeDistrict) || [];
+      const deptIds = districtDepts.map(d => d.id);
+      const { data: workers } = await supabase.from("field_workers").select("id, worker_name, department_id").in("department_id", deptIds);
+      departmentWorkers = workers || [];
+      const workerIds = departmentWorkers.map(w => w.id);
+
+      if (workerIds.length > 0) {
+        const { data: wo } = await supabase.from("work_orders").select("*").in("worker_id", workerIds);
+        relevantWorkOrders = wo || [];
+      }
+    } else if (role === 'AE') {
+      const { data: workers } = await supabase.from("field_workers").select("id, worker_name, department_id").eq("department_id", myDept?.id);
+      departmentWorkers = workers || [];
+      const workerIds = departmentWorkers.map(w => w.id);
+
+      if (workerIds.length > 0) {
+        const { data: wo } = await supabase.from("work_orders").select("*").in("worker_id", workerIds);
+        relevantWorkOrders = wo || [];
+      }
+    } else {
+      const { data: wo } = await supabase.from("work_orders").select("*").eq("worker_id", workerProfile.id);
+      relevantWorkOrders = wo || [];
+    }
+
+    // 3. FETCH MAP DATA AND PROCESS
+    const { data: allReports } = await supabase.from("dashboard_reports").select("*");
+    const { data: allWorkOrders } = await supabase.from("work_orders").select("report_id, department_id");
+
+    const processedTickets = allReports?.map((report) => {
+        const matchingWorkOrder = relevantWorkOrders.find((wo) => String(wo.report_id) === String(report.id));
+        const isMine = !!matchingWorkOrder;
+
+        let assignedWorkerName = "Other Division";
+        if (isMine) {
+            if (role === 'AE' || role === 'EE' || role === 'CE') {
+                const assignedWorker = departmentWorkers.find(w => String(w.id) === String(matchingWorkOrder.worker_id));
+                if (assignedWorker) {
+                    assignedWorkerName = assignedWorker.worker_name;
+                    // For EE & CE, add the division name so they know where the JE is located
+                    if (role === 'EE' || role === 'CE') {
+                        const wDept = allDepts?.find(d => d.id === assignedWorker.department_id);
+                        if (wDept) assignedWorkerName += ` (${wDept.taluka_name})`;
+                    }
+                } else {
+                    assignedWorkerName = "Unassigned JE";
+                }
+            } else {
+                assignedWorkerName = workerProfile.worker_name;
+            }
+        }
+
+        let type = report.issue_type || "Pothole / Issue";
+        if (type.toLowerCase().includes("massive") || type.toLowerCase().includes("high severity")) type = "Major Pothole";
+
+        let resolvedDepartmentName = report.assigned_department || report.village_name;
+        if (!resolvedDepartmentName) {
+            const globalWorkOrder = allWorkOrders?.find((wo) => String(wo.report_id) === String(report.id));
+            if (globalWorkOrder) {
+                const wDept = allDepts?.find(d => String(d.id) === String(globalWorkOrder.department_id));
+                if (wDept) {
+                    resolvedDepartmentName = wDept.department_name;
+                }
+            }
+        }
+
+        return {
+          id: report.id,
+          latitude: report.latitude, 
+          longitude: report.longitude,
+          display_type: type,
+          status: matchingWorkOrder ? matchingWorkOrder.status : "Pending",
+          is_my_territory: isMine,
+          worker_name: assignedWorkerName,
+          ai_predictions: report.ai_predictions,
+          assigned_department: resolvedDepartmentName || "Location Unknown",
+        };
+      }) || [];
+
+    const activeTicketsOnly = processedTickets.filter((t) => {
+      const statusText = (t.status || "").toLowerCase();
+      const isResolved = statusText === "resolved" || statusText === "completed";
+      const isPotholeOrMine = t.display_type.toLowerCase().includes("pothole") || t.is_my_territory;
+      return !isResolved && isPotholeOrMine;
     });
 
-    return NextResponse.json({ success: true, departments: enhancedDepartments });
+    const displayDepartmentName = role === 'CE' ? "Goa State Operations" : role === 'EE' ? `${eeDistrict} Operations` : (myDept?.department_name || "Unknown");
 
+    return NextResponse.json({
+      success: true,
+      currentUser: { name: userName, level: userLevel, taluka: userTaluka, role: role },
+      departments: [{
+          department_name: displayDepartmentName,
+          tickets: activeTicketsOnly,
+          total_reports: activeTicketsOnly.length,
+          pending_reports: activeTicketsOnly.filter((t) => t.is_my_territory).length,
+      }],
+    });
   } catch (error: any) {
-    console.error("Departments API Error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Database fetch failed" }, 
-      { status: 500 }
-    );
+    console.error("API Error:", error);
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
